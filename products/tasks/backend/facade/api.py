@@ -10836,6 +10836,34 @@ def _is_idle_warm_run(run: TaskRun) -> bool:
     return state.get("prewarmed") is True and state.get("await_user_message") is True
 
 
+def _release_idle_warm_runs(runs: Sequence[TaskRun], task: Task, team_id: int, user_id: int) -> bool:
+    """Hand back warm runs that idle for the next message of a history an edit replaces. ``False`` when one
+    of them took a message first, so the conversation moved on."""
+    from products.tasks.backend.facade.cancellation import (  # noqa: PLC0415 — cancellation imports this module
+        cancel_task_run,
+    )
+
+    distinct_id = User.objects.filter(id=user_id).values_list("distinct_id", flat=True).first()
+    for warm_run in runs:
+        outcome, _ = cancel_task_run(
+            warm_run.id,
+            task.id,
+            team_id,
+            reason="The message it was warmed for was edited",
+            source="message_edit",
+            requested_by_user_id=user_id,
+            requested_by_distinct_id=distinct_id,
+            only_if_awaiting_first_message=True,
+        )
+        if outcome == "already_activated":
+            return False
+        if outcome == "unavailable":
+            # The successor becomes the task's latest run, so the warm run is no longer reused, and it stops
+            # itself once its idle timeout passes.
+            logger.warning("Could not release warm run %s after a message edit", warm_run.id)
+    return True
+
+
 def edit_task_run_message(
     task_id: str | UUID,
     run_id: str | UUID,
@@ -10851,7 +10879,8 @@ def edit_task_run_message(
 
     The address is the message's run and its index in that run's own log. The successor's history ends before
     the message, and its pending message is ``text`` with the original's context blocks and permission mode.
-    Every check runs before the successor is created, so a refused edit writes nothing. ``None`` when the task
+    A warm run idling for the next message was warmed for the history the edit drops, so the edit hands it
+    back before the successor starts. Every check runs before that, so a refused edit writes nothing. ``None`` when the task
     or run is not visible.
     """
     from posthog.storage import object_storage  # noqa: PLC0415 — keep storage deps off the api import path
@@ -10870,7 +10899,7 @@ def edit_task_run_message(
     if not run.is_terminal:
         return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_ACTIVE)
     # A warm successor idling for the next message holds no turns, so it does not change the conversation.
-    newer_runs = task.runs.filter(team_id=team_id, created_at__gt=run.created_at).only("id", "state")
+    newer_runs = list(task.runs.filter(team_id=team_id, created_at__gt=run.created_at).only("id", "state"))
     if not all(_is_idle_warm_run(newer_run) for newer_run in newer_runs):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
     chain = run.get_history_chain()
@@ -10900,6 +10929,8 @@ def edit_task_run_message(
         for entry in manifests.get(artifact.run_id, [])
         if entry.get("id") == artifact.artifact_id and entry.get("storage_path")
     ]
+    if newer_runs and not _release_idle_warm_runs(newer_runs, task, team_id, user_id):
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
     result = run_task(
         task.id,
         team_id,

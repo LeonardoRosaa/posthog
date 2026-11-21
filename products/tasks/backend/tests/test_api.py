@@ -12568,12 +12568,26 @@ class TestTaskRunAPI(BaseTaskAPITest):
             enabled if flag_name == "phai-edit-messages" else previous(flag_name, *args, **kwargs)
         )
 
+    def _warm_successor(self, task: Task, source: TaskRun, **state: Any) -> TaskRun:
+        return TaskRun.objects.create(
+            task=task,
+            team=self.team,
+            status=TaskRun.Status.QUEUED,
+            state={"prewarmed": True, "await_user_message": True, "resume_from_run_id": str(source.id), **state},
+        )
+
+    @parameterized.expand([("without_a_warm_run", False), ("hands_back_the_idle_warm_run", True)])
+    @patch("products.tasks.backend.facade.cancellation._interrupt_agent_turn")
+    @patch("products.tasks.backend.facade.cancellation._signal_complete_task", return_value="signaled")
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     @patch("posthog.storage.object_storage.read")
-    def test_edit_message_starts_a_cold_successor_with_the_cut(self, mock_read, mock_workflow):
+    def test_edit_message_starts_a_cold_successor_with_the_cut(
+        self, _name: str, with_warm_run: bool, mock_read, mock_workflow, mock_signal, _mock_interrupt
+    ):
         self._enable_edit_flag(True)
         task, first, latest, logs = self._edit_message_fixture()
         mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
+        warm = self._warm_successor(task, latest) if with_warm_run else None
 
         response = self._post_edit(task, latest, first, 1, "show signups")
 
@@ -12590,6 +12604,15 @@ class TestTaskRunAPI(BaseTaskAPITest):
         self.assertEqual(successor.state["pending_user_artifact_ids"], ["art-chart"])
         self.assertEqual(successor.artifacts, [self._edit_message_attachment(task, first)])
         mock_workflow.assert_called_once()
+        if warm is None:
+            mock_signal.assert_not_called()
+        else:
+            warm.refresh_from_db()
+            self.assertEqual(warm.state["cancel_source"], "message_edit")
+            self.assertEqual(
+                [(call.args[0].id, call.args[1]) for call in mock_signal.call_args_list],
+                [(warm.id, TaskRun.Status.CANCELLED)],
+            )
 
     @parameterized.expand(
         [
@@ -12599,6 +12622,7 @@ class TestTaskRunAPI(BaseTaskAPITest):
             ("address_is_an_agent_message", "agent_index", status.HTTP_409_CONFLICT, "conversation_changed"),
             ("run_is_live", "live_run", status.HTTP_409_CONFLICT, "run_active"),
             ("a_newer_run_continued_it", "newer_run", status.HTTP_409_CONFLICT, "conversation_changed"),
+            ("the_warm_run_took_a_message", "activating_warm_run", status.HTTP_409_CONFLICT, "conversation_changed"),
         ]
     )
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
@@ -12615,6 +12639,8 @@ class TestTaskRunAPI(BaseTaskAPITest):
             TaskRun.objects.filter(id=latest.id).update(status=TaskRun.Status.IN_PROGRESS)
         if case == "newer_run":
             TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(latest.id)})
+        if case == "activating_warm_run":
+            self._warm_successor(task, latest, warm_activation_started=True)
         run_count = task.runs.count()
 
         response = self._post_edit(
