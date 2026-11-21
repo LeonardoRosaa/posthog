@@ -18,10 +18,12 @@ function HumanMessageFooter({
     startedAt,
     text,
     onEdit,
+    editDisabledReason,
 }: {
     startedAt?: number
     text?: string
     onEdit?: () => void
+    editDisabledReason?: string
 }): JSX.Element {
     return (
         <div className="flex items-center gap-1 mt-1.5 mr-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -47,6 +49,7 @@ function HumanMessageFooter({
                     tooltip="Edit message"
                     aria-label="Edit message"
                     data-attr="posthog-ai-human-message-edit"
+                    disabledReason={editDisabledReason}
                     onClick={onEdit}
                 />
             )}
@@ -57,9 +60,12 @@ function HumanMessageFooter({
 export const LemonHumanMessage = memo(function LemonHumanMessage({
     item,
     onEdit,
+    editDisabledReason,
 }: {
     item: ThreadItem
     onEdit?: () => void
+    /** Shows the edit button disabled, with this reason in its tooltip. */
+    editDisabledReason?: string
 }): JSX.Element {
     const text = userMessageDisplayText(item.text ?? '')
     const screenshotNames = commentScreenshotNames(item.text ?? '')
@@ -67,7 +73,14 @@ export const LemonHumanMessage = memo(function LemonHumanMessage({
         <MessageTemplate
             type="human"
             className="group"
-            action={<HumanMessageFooter startedAt={item.startedAt} text={text} onEdit={onEdit} />}
+            action={
+                <HumanMessageFooter
+                    startedAt={item.startedAt}
+                    text={text}
+                    onEdit={onEdit}
+                    editDisabledReason={editDisabledReason}
+                />
+            }
         >
             <HumanMessageText text={item.text ?? ''} id={item.id} attachments={item.attachments} />
             {item.attachments && <ThreadAttachments attachments={item.attachments} badgeNames={screenshotNames} />}

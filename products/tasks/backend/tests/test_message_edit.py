@@ -8,9 +8,11 @@ from parameterized import parameterized
 from products.tasks.backend.logic.message_edit import (
     AttachedArtifact,
     EditedMessage,
+    cleared_after,
     edited_message_at,
     edited_message_content,
     history_segments,
+    is_agent_command,
     turn_is_complete,
 )
 from products.tasks.backend.models import TaskRun
@@ -182,3 +184,40 @@ class TestTurnIsComplete(SimpleTestCase):
     )
     def test_reads_the_last_turn(self, _name: str, entries: list[str], expected: bool) -> None:
         self.assertEqual(turn_is_complete(entries), expected)
+
+
+CLEARED = json.dumps({"notification": {"method": "_posthog/conversation_cleared", "params": {}}})
+COMPACTED = json.dumps({"notification": {"method": "_posthog/compact_boundary", "params": {}}})
+
+
+class TestEditRules(SimpleTestCase):
+    @parameterized.expand(
+        [
+            ("compact", "/compact", True),
+            ("command_with_arguments", "  /review the last diff", True),
+            ("namespaced_skill", "/plugin:skill", True),
+            ("plain_text", "show signups", False),
+            ("a_path_is_not_a_command", "/usr/bin is missing", False),
+            ("slash_inside_the_text", "compare a/b", False),
+        ]
+    )
+    def test_spots_agent_commands(self, _name: str, text: str, expected: bool) -> None:
+        self.assertEqual(is_agent_command(text), expected)
+
+    @parameterized.expand(
+        [
+            ("clear_later_in_the_same_run", [[_user_message("a"), CLEARED]], 0, True),
+            ("clear_in_a_later_run", [[_user_message("a")], [_user_message("b"), CLEARED]], 0, True),
+            ("clear_before_the_message", [[CLEARED, _user_message("a")]], 1, False),
+            (
+                "compaction_keeps_the_message_editable",
+                [[_user_message("a"), COMPACTED], [_user_message("b")]],
+                0,
+                False,
+            ),
+        ]
+    )
+    def test_spots_a_clear_after_the_message(
+        self, _name: str, segment_entries: list[list[str]], index: int, expected: bool
+    ) -> None:
+        self.assertEqual(cleared_after(segment_entries, index), expected)

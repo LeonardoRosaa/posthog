@@ -12587,6 +12587,7 @@ class TestTaskRunAPI(BaseTaskAPITest):
             ("after_a_finished_run", "finished_run"),
             ("hands_back_the_idle_warm_run", "warm_run"),
             ("ends_the_live_run_between_turns", "live_run"),
+            ("a_compaction_after_the_message_keeps_it_editable", "compacted"),
         ]
     )
     @patch("products.tasks.backend.facade.cancellation._interrupt_agent_turn")
@@ -12600,6 +12601,10 @@ class TestTaskRunAPI(BaseTaskAPITest):
         task, first, latest, logs = self._edit_message_fixture()
         mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
         stopped = self._warm_successor(task, latest) if case == "warm_run" else None
+        if case == "compacted":
+            logs[latest.log_url].append(
+                json.dumps({"notification": {"method": "_posthog/compact_boundary", "params": {}}})
+            )
         if case == "live_run":
             TaskRun.objects.filter(id=latest.id).update(status=TaskRun.Status.IN_PROGRESS)
             stopped = latest
@@ -12638,6 +12643,9 @@ class TestTaskRunAPI(BaseTaskAPITest):
             ("live_run_is_mid_turn", "mid_turn", status.HTTP_409_CONFLICT, "run_active"),
             ("live_run_has_a_message_on_its_way", "queued_message", status.HTTP_409_CONFLICT, "run_active"),
             ("ending_the_live_run_fails", "end_fails", status.HTTP_503_SERVICE_UNAVAILABLE, "run_end_failed"),
+            ("a_clear_follows_the_message", "cleared", status.HTTP_409_CONFLICT, "before_clear"),
+            ("the_message_is_an_agent_command", "command", status.HTTP_409_CONFLICT, "agent_command"),
+            ("the_task_started_from_slack", "slack", status.HTTP_403_FORBIDDEN, "slack_task"),
             ("a_newer_run_continued_it", "newer_run", status.HTTP_409_CONFLICT, "conversation_changed"),
             ("the_warm_run_took_a_message", "activating_warm_run", status.HTTP_409_CONFLICT, "conversation_changed"),
         ]
@@ -12672,15 +12680,24 @@ class TestTaskRunAPI(BaseTaskAPITest):
             TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(latest.id)})
         if case == "activating_warm_run":
             self._warm_successor(task, latest, warm_activation_started=True)
+        if case == "cleared":
+            logs[latest.log_url].append(
+                json.dumps({"notification": {"method": "_posthog/conversation_cleared", "params": {}}})
+            )
+        if case == "command":
+            logs[latest.log_url].append(self._chat_line("user", "/compact"))
+        if case == "slack":
+            Task.objects.filter(id=task.id).update(origin_product=Task.OriginProduct.SLACK)
         run_count = task.runs.count()
 
-        response = self._post_edit(
-            task,
-            latest,
-            first,
-            3 if case == "agent_index" else 1,
-            "show other things" if case == "other_text" else "show signups",
-        )
+        address_run, index, original_text = first, 1, "show signups"
+        if case == "agent_index":
+            index = 3
+        if case == "other_text":
+            original_text = "show other things"
+        if case == "command":
+            address_run, index, original_text = latest, 3, "/compact"
+        response = self._post_edit(task, latest, address_run, index, original_text)
 
         self.assertEqual(response.status_code, expected_status, response.json())
         self.assertEqual(response.json()["code"], expected_code)

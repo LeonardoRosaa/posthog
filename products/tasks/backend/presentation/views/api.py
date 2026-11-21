@@ -3599,6 +3599,18 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
             status.HTTP_409_CONFLICT,
             "Messages in this chat can't be edited.",
         ),
+        tasks_contracts.TaskRunMessageEditRefusal.BEFORE_CLEAR: (
+            status.HTTP_409_CONFLICT,
+            "Messages before /clear can't be edited.",
+        ),
+        tasks_contracts.TaskRunMessageEditRefusal.AGENT_COMMAND: (
+            status.HTTP_409_CONFLICT,
+            "Commands can't be edited.",
+        ),
+        tasks_contracts.TaskRunMessageEditRefusal.SLACK_TASK: (
+            status.HTTP_403_FORBIDDEN,
+            "Messages in chats started from Slack can't be edited.",
+        ),
         tasks_contracts.TaskRunMessageEditRefusal.RUN_END_FAILED: (
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Couldn't stop the agent to save your edit. Try again.",
@@ -3616,7 +3628,8 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                 response=TaskRunErrorResponseSerializer,
                 description=(
                     "Editing is not enabled for the user (code `edit_messages_disabled`), the user did not create "
-                    "the task (code `not_task_creator`), or PostHog Desktop access is required"
+                    "the task (code `not_task_creator`), the task started from Slack (code `slack_task`), or "
+                    "PostHog Desktop access is required"
                 ),
             ),
             404: OpenApiResponse(description="Task or run not found"),
@@ -3625,7 +3638,8 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                 description=(
                     "The run is mid-turn or has a message on its way to the agent (code `run_active`), the address does not point at a user message "
                     "with the original text in this run's conversation, or a newer run continued it (code "
-                    "`conversation_changed`), or the task's runtime keeps no message addresses (code "
+                    "`conversation_changed`), the message is an agent slash command (code `agent_command`), a "
+                    "`/clear` follows the message (code `before_clear`), or the task's runtime keeps no message addresses (code "
                     "`unsupported_runtime`)"
                 ),
             ),

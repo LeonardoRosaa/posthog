@@ -635,6 +635,9 @@ class TaskRunMessageEditRefusal(StrEnum):
     CONVERSATION_CHANGED = "conversation_changed"
     UNSUPPORTED_RUNTIME = "unsupported_runtime"
     RUN_END_FAILED = "run_end_failed"
+    BEFORE_CLEAR = "before_clear"
+    AGENT_COMMAND = "agent_command"
+    SLACK_TASK = "slack_task"
 
 
 @dataclass(frozen=True)

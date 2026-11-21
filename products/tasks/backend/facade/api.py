@@ -148,9 +148,11 @@ from products.tasks.backend.logic.log_slice import (
 from products.tasks.backend.logic.message_edit import (
     HistorySegment,
     LogCut,
+    cleared_after,
     edited_message_at,
     edited_message_content,
     history_segments,
+    is_agent_command,
     log_cut_from_state,
     turn_is_complete,
 )
@@ -10908,6 +10910,9 @@ def edit_task_run_message(
         return contracts.TaskRunMessageEditResult(refusal=Refusal.NOT_TASK_CREATOR)
     if task.runtime == Task.Runtime.PI:
         return contracts.TaskRunMessageEditResult(refusal=Refusal.UNSUPPORTED_RUNTIME)
+    # Slack shows the replies a task posted there, and an edit would leave them answering messages that are gone.
+    if task.origin_product == Task.OriginProduct.SLACK:
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.SLACK_TASK)
     # A live run can be ended for an edit only between turns, once nothing is on its way to the agent.
     live = not run.is_terminal
     if live and (run.environment != TaskRun.Environment.CLOUD or run.has_pending_followup_messages):
@@ -10917,22 +10922,29 @@ def edit_task_run_message(
     if not all(_is_idle_warm_run(newer_run) for newer_run in newer_runs):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
     chain = run.get_history_chain()
-    segment = next(
-        (segment for segment in history_segments(chain) if str(segment.run.id) == message_run_id),
-        None,
+    segments = history_segments(chain)
+    position = next(
+        (position for position, segment in enumerate(segments) if str(segment.run.id) == message_run_id), None
     )
+    segment = segments[position] if position is not None else None
     if segment is None or (segment.end is not None and index >= segment.end):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    assert position is not None
     entries = log_entries(object_storage.read(segment.run.log_url, missing_ok=True) or "")
     message = edited_message_at(entries, index)
     if message is None or message.text != original_text.strip():
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    if is_agent_command(message.text):
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.AGENT_COMMAND)
+    later_entries = [
+        log_entries(object_storage.read(later.run.log_url, missing_ok=True) or "")[: later.end]
+        for later in segments[position + 1 :]
+    ]
+    if cleared_after([entries[: segment.end], *later_entries], index):
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.BEFORE_CLEAR)
     if live:
-        run_entries = (
-            entries
-            if segment.run.id == run.id
-            else log_entries(object_storage.read(run.log_url, missing_ok=True) or "")
-        )
+        # The run is the chain's last segment, kept whole, since nothing cuts it.
+        run_entries = entries if segment.run.id == run.id else later_entries[-1]
         if not turn_is_complete(run_entries):
             return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_ACTIVE)
 

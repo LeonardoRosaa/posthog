@@ -5,6 +5,7 @@ the edited message as its cut. A history read keeps the log of the run at that a
 address, and drops the runs between that run and the cut.
 """
 
+import re
 import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
@@ -151,6 +152,28 @@ def _is_user_entry(notification: Mapping[str, Any]) -> bool:
         "user_message",
         "user_message_chunk",
     )
+
+
+# The same rule as `startsWithAgentCommand` in the PostHog AI frontend: a command name, then a space or the end.
+_AGENT_COMMAND = re.compile(r"^/[A-Za-z][\w:.-]*(\s|$)")
+
+
+def is_agent_command(text: str) -> bool:
+    """Whether a message is an agent slash command such as `/compact`. App commands never reach a run log."""
+    return _AGENT_COMMAND.match(text.strip()) is not None
+
+
+def cleared_after(segment_entries: Sequence[Sequence[str]], index: int) -> bool:
+    """Whether a `/clear` boundary follows the entry at ``index`` of the first segment's entries.
+
+    ``segment_entries`` holds the log entries a history read keeps, for the message's run and each run after it.
+    A resume keeps only the turns after the last boundary, so a message before one is not in the agent's context.
+    """
+    for position, entries in enumerate(segment_entries):
+        for line in entries[index + 1 :] if position == 0 else entries:
+            if "conversation_cleared" in line and _notification(line).get("method") == "_posthog/conversation_cleared":
+                return True
+    return False
 
 
 def turn_is_complete(entries: Sequence[str]) -> bool:

@@ -17,12 +17,15 @@ export function QuillFooterButton({
     tooltip,
     onClick,
     dataAttr,
+    disabledReason,
     children,
 }: {
     label: string
     tooltip?: string
     onClick: () => void
     dataAttr?: string
+    /** Disables the button and shows this reason in the tooltip instead. */
+    disabledReason?: string
     children: ReactNode
 }): JSX.Element {
     const { todayRailEnabled, phoneLayout } = useValues(todayShellLogic)
@@ -35,15 +38,21 @@ export function QuillFooterButton({
                         variant="default"
                         size={todayRailEnabled && phoneLayout ? 'icon-sm' : 'icon-xs'}
                         aria-label={label}
-                        onClick={onClick}
+                        // aria-disabled rather than disabled, so the tooltip with the reason still opens on hover.
+                        aria-disabled={disabledReason ? true : undefined}
+                        onClick={disabledReason ? undefined : onClick}
                         data-attr={dataAttr}
-                        className="text-muted-foreground hover:text-foreground"
+                        className={
+                            disabledReason
+                                ? 'text-muted-foreground opacity-50 cursor-not-allowed'
+                                : 'text-muted-foreground hover:text-foreground'
+                        }
                     >
                         {children}
                     </Button>
                 }
             />
-            <TooltipContent>{tooltip ?? label}</TooltipContent>
+            <TooltipContent>{disabledReason ?? tooltip ?? label}</TooltipContent>
         </Tooltip>
     )
 }

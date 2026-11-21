@@ -1,4 +1,4 @@
-import { BindLogic, useActions, useValues } from 'kea'
+import { BindLogic, useActions, useMountedLogic, useValues } from 'kea'
 import { type MutableRefObject, useEffect, useMemo, useRef } from 'react'
 
 import { cn } from 'lib/utils/css-classes'
@@ -17,9 +17,11 @@ import { QuillTaskComposerSkeleton } from '../../../components/quill/QuillTaskCo
 import { RunEscapeBoundary, type RunEscapeBoundaryProps } from '../../../components/RunEscapeBoundary'
 import { useForegroundStream } from '../../../hooks/useForegroundStream'
 import { useThreadSkin } from '../../../hooks/useThreadSkin'
+import { messageEditLogic } from '../../../logics/messageEditLogic'
 import { resolveRunStreamKey } from '../../../logics/retainedLogics'
 import { runCancellationLogic } from '../../../logics/runCancellationLogic'
 import type { RunContinuationHandoff } from '../../../logics/runInteractionLogic'
+import { OriginProduct } from '../../../types/taskTypes'
 import { taskDetailSceneLogic } from '../taskDetailSceneLogic'
 import { TaskRunComposer } from './TaskRunComposer'
 
@@ -124,6 +126,7 @@ export function TaskRunChat({
                 logicProps={logicProps}
                 readOnly={readOnly}
                 canEditMessages={isTaskCreator && !readOnly}
+                startedFromSlack={task?.origin_product === OriginProduct.SLACK}
                 escapeScope={escapeScope}
                 autoFocus={autoFocus}
                 flushDraftRef={flushDraftRef}
@@ -138,6 +141,7 @@ function TaskRunChatContent({
     logicProps,
     readOnly,
     canEditMessages,
+    startedFromSlack,
     escapeScope,
     autoFocus,
     flushDraftRef,
@@ -147,6 +151,7 @@ function TaskRunChatContent({
     logicProps: RunInteractionLogicProps
     readOnly: boolean
     canEditMessages: boolean
+    startedFromSlack: boolean
     escapeScope: RunEscapeBoundaryProps['scope']
     autoFocus?: boolean
     flushDraftRef: MutableRefObject<() => void>
@@ -156,7 +161,7 @@ function TaskRunChatContent({
     const textAreaRef = useRef<HTMLTextAreaElement>(null)
     const skin = useThreadSkin()
     const { handleEscape } = useActions(runInteractionLogic(logicProps))
-    const { cancellationState } = useValues(runInteractionLogic(logicProps))
+    const { cancellationState, queuedMessages } = useValues(runInteractionLogic(logicProps))
     const { clearCancellation } = useActions(
         runCancellationLogic({ streamKey: logicProps.streamKey ?? logicProps.runId })
     )
@@ -171,6 +176,13 @@ function TaskRunChatContent({
         () => (canEditMessages ? { streamKey, onRunStarted } : null),
         [canEditMessages, streamKey, onRunStarted]
     )
+    // Mounted here as well as by each message, so the context below survives a thread with no messages yet.
+    const editLogicProps = messageEditing ?? { streamKey }
+    useMountedLogic(messageEditLogic(editLogicProps))
+    const { setEditContext } = useActions(messageEditLogic(editLogicProps))
+    useEffect(() => {
+        setEditContext(startedFromSlack, queuedMessages.length)
+    }, [setEditContext, startedFromSlack, queuedMessages.length])
     return (
         // `RunSurface.Root` and `runInteractionLogic` deliberately share the same stream key (`streamKey ?? runId`,
         // resolved inside each): the composer slot's gating must read the exact stream the thread renders. The

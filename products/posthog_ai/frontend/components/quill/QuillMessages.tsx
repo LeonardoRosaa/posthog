@@ -89,6 +89,8 @@ export interface QuillHumanBubbleProps {
     before?: ReactNode
     /** Opens the editor for this message. Omit to hide the edit button. */
     onEdit?: () => void
+    /** Shows the edit button disabled, with this reason in its tooltip. */
+    editDisabledReason?: string
     className?: string
     children: ReactNode
 }
@@ -102,6 +104,7 @@ export function QuillHumanBubble({
     startedAt,
     before,
     onEdit,
+    editDisabledReason,
     className,
     children,
 }: QuillHumanBubbleProps): JSX.Element {
@@ -130,6 +133,7 @@ export function QuillHumanBubble({
                                 label="Edit message"
                                 onClick={onEdit}
                                 dataAttr="posthog-ai-human-message-edit"
+                                disabledReason={editDisabledReason}
                             >
                                 <IconPencil />
                             </QuillFooterButton>
@@ -175,9 +179,11 @@ export function QuillAssistantMarkdown({ content, id }: { content: string; id: s
 export const QuillHumanMessage = memo(function QuillHumanMessage({
     item,
     onEdit,
+    editDisabledReason,
 }: {
     item: ThreadItem
     onEdit?: () => void
+    editDisabledReason?: string
 }): JSX.Element {
     const text = userMessageDisplayText(item.text ?? '')
     const screenshotNames = commentScreenshotNames(item.text ?? '')
@@ -186,6 +192,7 @@ export const QuillHumanMessage = memo(function QuillHumanMessage({
             copyText={text || undefined}
             startedAt={item.startedAt}
             onEdit={onEdit}
+            editDisabledReason={editDisabledReason}
             before={
                 item.attachments ? (
                     <ThreadAttachments attachments={item.attachments} badgeNames={screenshotNames} />

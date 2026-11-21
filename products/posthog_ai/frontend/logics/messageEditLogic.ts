@@ -6,7 +6,9 @@ import { featureFlagLogic, type FeatureFlagsSet } from 'lib/logic/featureFlagLog
 
 import { tasksRunsEditMessageCreate } from 'products/tasks/frontend/generated/api'
 
-import type { ThreadItem } from '../types/streamTypes'
+import type { PermissionRequestRecord, ThreadItem } from '../types/streamTypes'
+import { startsWithAgentCommand } from '../utils/slashCommands'
+import { userMessageDisplayText } from '../utils/userMessageDisplay'
 import type { RunContinuationHandoff } from './runInteractionLogic'
 import { isTerminalRunStatus, runStreamLogic, type RunStatus } from './runStreamLogic'
 
@@ -25,8 +27,14 @@ export interface messageEditLogicValues {
     draft: string
     editingEnabled: boolean
     editingMessageId: string | null
+    messageEditBlockedReasons: Record<string, string>
+    pendingPermissionRequest: PermissionRequestRecord | null // runStreamLogic
+    queuedMessageCount: number
+    runEditBlockedReason: string | null
     saveError: string | null
     saving: boolean
+    startedFromSlack: boolean
+    threadItems: ThreadItem[] // runStreamLogic
     turnComplete: boolean // runStreamLogic
 }
 
@@ -44,6 +52,13 @@ export interface messageEditLogicActions {
     saveEditSuccess: () => {
         value: true
     }
+    setEditContext: (
+        startedFromSlack: boolean,
+        queuedMessageCount: number
+    ) => {
+        queuedMessageCount: number
+        startedFromSlack: boolean
+    }
     setDraft: (draft: string) => {
         draft: string
     }
@@ -58,11 +73,17 @@ export interface messageEditLogicMeta {
     __keaTypeGenInternalSelectorTypes: {
         editingEnabled: (
             featureFlags: FeatureFlagsSet,
-            currentRunStatus: RunStatus | null,
-            turnComplete: boolean,
             bootstrappedTaskId: string | null,
             bootstrappedRunId: string | null
         ) => boolean
+        messageEditBlockedReasons: (threadItems: ThreadItem[]) => Record<string, string>
+        runEditBlockedReason: (
+            startedFromSlack: boolean,
+            pendingPermissionRequest: PermissionRequestRecord | null,
+            queuedMessageCount: number,
+            currentRunStatus: RunStatus | null,
+            turnComplete: boolean
+        ) => string | null
     }
 }
 
@@ -75,12 +96,61 @@ export type messageEditLogicType = MakeLogicType<
 
 const SAVE_FAILED_MESSAGE = "Couldn't save your edit. Try again."
 
-/** A finished run can take an edit, and so can a live one between turns, which the server ends first. */
-export function runAcceptsEdits(runStatus: RunStatus | null, turnComplete: boolean): boolean {
-    if (runStatus === null) {
-        return false
+export const EDIT_BLOCKED_REASONS = {
+    slack: "Messages in chats started from Slack can't be edited",
+    command: "Commands can't be edited",
+    beforeClear: "Messages before /clear can't be edited",
+    waitingAnswer: 'Answer the waiting question or approval first',
+    queued: 'Wait for your queued messages to send',
+    replying: 'Wait for the reply to finish',
+} as const
+
+export interface RunEditState {
+    startedFromSlack: boolean
+    waitingForAnswer: boolean
+    queuedMessageCount: number
+    runStatus: RunStatus | null
+    turnComplete: boolean
+}
+
+/**
+ * Why no message in the run can be edited right now, or null when they can. A finished run takes edits, and so
+ * does a live one between turns, which the server ends first. Every reason but Slack clears by itself.
+ */
+export function runEditBlockedReason(state: RunEditState): string | null {
+    if (state.startedFromSlack) {
+        return EDIT_BLOCKED_REASONS.slack
     }
-    return isTerminalRunStatus(runStatus) || turnComplete
+    if (state.waitingForAnswer) {
+        return EDIT_BLOCKED_REASONS.waitingAnswer
+    }
+    if (state.queuedMessageCount > 0) {
+        return EDIT_BLOCKED_REASONS.queued
+    }
+    if (state.runStatus === null || (!isTerminalRunStatus(state.runStatus) && !state.turnComplete)) {
+        return EDIT_BLOCKED_REASONS.replying
+    }
+    return null
+}
+
+/**
+ * Why each of the user's messages can never be edited, by item id. A resume keeps only the turns after the last
+ * `/clear`, so earlier messages are out of reach. A compaction keeps the turns, so it blocks nothing.
+ */
+export function messageEditBlockedReasons(threadItems: ThreadItem[]): Record<string, string> {
+    const lastClear = threadItems.findLastIndex((item) => item.type === 'conversation_cleared')
+    const reasons: Record<string, string> = {}
+    threadItems.forEach((item, position) => {
+        if (item.type !== 'human_message') {
+            return
+        }
+        if (startsWithAgentCommand(userMessageDisplayText(item.text ?? ''))) {
+            reasons[item.id] = EDIT_BLOCKED_REASONS.command
+        } else if (position < lastClear) {
+            reasons[item.id] = EDIT_BLOCKED_REASONS.beforeClear
+        }
+    })
+    return reasons
 }
 
 export const messageEditLogic = kea<messageEditLogicType>([
@@ -92,7 +162,15 @@ export const messageEditLogic = kea<messageEditLogicType>([
             featureFlagLogic,
             ['featureFlags'],
             runStreamLogic({ streamKey: props.streamKey }),
-            ['bootstrappedRunId', 'bootstrappedTaskId', 'currentProjectId', 'currentRunStatus', 'turnComplete'],
+            [
+                'bootstrappedRunId',
+                'bootstrappedTaskId',
+                'currentProjectId',
+                'currentRunStatus',
+                'pendingPermissionRequest',
+                'threadItems',
+                'turnComplete',
+            ],
         ],
     })),
     actions({
@@ -102,8 +180,15 @@ export const messageEditLogic = kea<messageEditLogicType>([
         saveEdit: (item: ThreadItem) => ({ item }),
         saveEditSuccess: true,
         saveEditFailure: (error: string) => ({ error }),
+        /** Set by the host, which knows the task and the composer. Kept in state, not props, so selectors see it. */
+        setEditContext: (startedFromSlack: boolean, queuedMessageCount: number) => ({
+            startedFromSlack,
+            queuedMessageCount,
+        }),
     }),
     reducers({
+        startedFromSlack: [false, { setEditContext: (_, { startedFromSlack }) => startedFromSlack }],
+        queuedMessageCount: [0, { setEditContext: (_, { queuedMessageCount }) => queuedMessageCount }],
         editingMessageId: [
             null as string | null,
             {
@@ -141,18 +226,36 @@ export const messageEditLogic = kea<messageEditLogicType>([
     }),
     selectors({
         editingEnabled: [
-            (s) => [s.featureFlags, s.currentRunStatus, s.turnComplete, s.bootstrappedTaskId, s.bootstrappedRunId],
+            (s) => [s.featureFlags, s.bootstrappedTaskId, s.bootstrappedRunId],
+            (featureFlags: FeatureFlagsSet, taskId: string | null, runId: string | null): boolean =>
+                !!featureFlags[FEATURE_FLAGS.PHAI_EDIT_MESSAGES] && !!taskId && !!runId,
+        ],
+        runEditBlockedReason: [
+            (s) => [
+                s.startedFromSlack,
+                s.pendingPermissionRequest,
+                s.queuedMessageCount,
+                s.currentRunStatus,
+                s.turnComplete,
+            ],
             (
-                featureFlags: FeatureFlagsSet,
+                startedFromSlack: boolean,
+                pendingPermissionRequest: PermissionRequestRecord | null,
+                queuedMessageCount: number,
                 currentRunStatus: RunStatus | null,
-                turnComplete: boolean,
-                taskId: string | null,
-                runId: string | null
-            ): boolean =>
-                !!featureFlags[FEATURE_FLAGS.PHAI_EDIT_MESSAGES] &&
-                runAcceptsEdits(currentRunStatus, turnComplete) &&
-                !!taskId &&
-                !!runId,
+                turnComplete: boolean
+            ): string | null =>
+                runEditBlockedReason({
+                    startedFromSlack,
+                    waitingForAnswer: pendingPermissionRequest !== null,
+                    queuedMessageCount,
+                    runStatus: currentRunStatus,
+                    turnComplete,
+                }),
+        ],
+        messageEditBlockedReasons: [
+            (s) => [s.threadItems],
+            (threadItems: ThreadItem[]): Record<string, string> => messageEditBlockedReasons(threadItems),
         ],
     }),
     listeners(({ actions, values, props }) => ({

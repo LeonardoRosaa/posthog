@@ -49,15 +49,24 @@ export const EditableHumanMessage = memo(function EditableHumanMessage({
     editing: MessageEditLogicProps
     quill: boolean
 }): JSX.Element {
-    const { editingEnabled, editingMessageId } = useValues(messageEditLogic(editing))
+    const { editingEnabled, editingMessageId, runEditBlockedReason, messageEditBlockedReasons } = useValues(
+        messageEditLogic(editing)
+    )
     const { startEdit } = useActions(messageEditLogic(editing))
     // A message seen only on the live stream has no log address yet, so the server could not find it.
     const editable = editingEnabled && !!item.logAddress
+    const disabledReason = messageEditBlockedReasons[item.id] ?? runEditBlockedReason ?? undefined
     const onEdit = useCallback(() => startEdit(item), [startEdit, item])
 
-    if (editable && editingMessageId === item.id) {
+    if (editable && !disabledReason && editingMessageId === item.id) {
         return <OpenMessageEditor item={item} editing={editing} quill={quill} />
     }
     const Message = quill ? QuillHumanMessage : LemonHumanMessage
-    return <Message item={item} onEdit={editable ? onEdit : undefined} />
+    return (
+        <Message
+            item={item}
+            onEdit={editable ? onEdit : undefined}
+            editDisabledReason={editable ? disabledReason : undefined}
+        />
+    )
 })

@@ -9,7 +9,13 @@ import { tasksRunsEditMessageCreate, tasksRunsRetrieve } from 'products/tasks/fr
 import type { TaskRunDetailDTOApi } from 'products/tasks/frontend/generated/api.schemas'
 
 import type { ThreadItem } from '../types/streamTypes'
-import { messageEditLogic, runAcceptsEdits } from './messageEditLogic'
+import {
+    EDIT_BLOCKED_REASONS,
+    messageEditBlockedReasons,
+    messageEditLogic,
+    runEditBlockedReason,
+    type RunEditState,
+} from './messageEditLogic'
 import { runStreamLogic } from './runStreamLogic'
 
 jest.mock('products/tasks/frontend/generated/api', () => ({
@@ -60,14 +66,52 @@ describe('messageEditLogic', () => {
         await expectLogic(logic, () => logic.actions.saveEdit(ITEM)).toDispatchActions([outcome])
     }
 
-    it.each([
-        ['a finished run', 'completed', false, true],
-        ['a live run between turns', 'in_progress', true, true],
-        ['a live run mid-turn', 'in_progress', false, false],
-        ['a run still queued', 'queued', false, false],
-        ['no run yet', null, false, false],
-    ] as const)('decides whether %s accepts edits', (_name, runStatus, turnComplete, expected) => {
-        expect(runAcceptsEdits(runStatus, turnComplete)).toBe(expected)
+    const IDLE: RunEditState = {
+        startedFromSlack: false,
+        waitingForAnswer: false,
+        queuedMessageCount: 0,
+        runStatus: 'completed',
+        turnComplete: false,
+    }
+
+    it.each<[string, Partial<RunEditState>, string | null]>([
+        ['a finished run', {}, null],
+        ['a live run between turns', { runStatus: 'in_progress', turnComplete: true }, null],
+        ['a live run mid-turn', { runStatus: 'in_progress' }, EDIT_BLOCKED_REASONS.replying],
+        ['a run still loading', { runStatus: null }, EDIT_BLOCKED_REASONS.replying],
+        ['a waiting approval or question', { waitingForAnswer: true }, EDIT_BLOCKED_REASONS.waitingAnswer],
+        ['queued messages', { queuedMessageCount: 2 }, EDIT_BLOCKED_REASONS.queued],
+        ['a task started from Slack', { startedFromSlack: true }, EDIT_BLOCKED_REASONS.slack],
+    ])('gives the run-wide reason for %s', (_name, state, expected) => {
+        expect(runEditBlockedReason({ ...IDLE, ...state })).toBe(expected)
+    })
+
+    it('blocks commands and messages before the last /clear, but not before a compaction', () => {
+        const items: ThreadItem[] = [
+            { id: 'old', type: 'human_message', text: 'show signups' },
+            { id: 'clear-cmd', type: 'human_message', text: '/clear' },
+            { id: 'cleared', type: 'conversation_cleared' },
+            { id: 'kept', type: 'human_message', text: 'show churn' },
+            { id: 'compact-cmd', type: 'human_message', text: '/compact' },
+            { id: 'compacted', type: 'compact_boundary' },
+            { id: 'path', type: 'human_message', text: '/usr/bin is missing' },
+        ]
+
+        expect(messageEditBlockedReasons(items)).toEqual({
+            old: EDIT_BLOCKED_REASONS.beforeClear,
+            'clear-cmd': EDIT_BLOCKED_REASONS.command,
+            'compact-cmd': EDIT_BLOCKED_REASONS.command,
+        })
+    })
+
+    it('re-enables editing once the queued messages are sent', () => {
+        expect(logic.values.runEditBlockedReason).toBeNull()
+
+        logic.actions.setEditContext(false, 1)
+        expect(logic.values.runEditBlockedReason).toBe(EDIT_BLOCKED_REASONS.queued)
+
+        logic.actions.setEditContext(false, 0)
+        expect(logic.values.runEditBlockedReason).toBeNull()
     })
 
     it('saves the edit at the message address and moves the thread to the new run', async () => {

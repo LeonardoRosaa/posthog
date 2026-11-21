@@ -143,6 +143,15 @@ export function filterSlashCommands(commands: SlashCommand[], draft: string): Sl
     return [...prefix, ...contains]
 }
 
+// The same rule as `is_agent_command` on the tasks backend: a command name, then a space or the end, so a path
+// such as `/usr/bin` is not a command.
+const AGENT_COMMAND = /^\/[A-Za-z][\w:.-]*(\s|$)/
+
+/** Whether a sent message is an agent slash command such as `/compact`. App commands never reach the thread. */
+export function startsWithAgentCommand(text: string): boolean {
+    return AGENT_COMMAND.test(text.trim())
+}
+
 export function parseSlashCommand(text: string): { name: string; args: string } | null {
     const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(text.trim())
     return match ? { name: match[1], args: (match[2] ?? '').trim() } : null
