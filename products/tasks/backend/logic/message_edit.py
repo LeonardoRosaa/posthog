@@ -8,6 +8,7 @@ address, and drops the runs between that run and the cut.
 import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from posthog.dataclasses import frozen
 
@@ -38,13 +39,22 @@ class HistorySegment:
 
 
 @frozen
+class AttachedArtifact:
+    """A file a user message carried: the run whose manifest lists it, and its id there."""
+
+    run_id: str
+    artifact_id: str
+
+
+@frozen
 class EditedMessage:
-    """The user message at an address: its visible text, the context blocks sent before that text, and the
-    permission mode the run was in when the user sent it."""
+    """The user message at an address: its visible text, the context blocks sent before that text, the
+    permission mode the run was in when the user sent it, and the files it carried."""
 
     text: str
     context: str
     mode: str | None
+    artifacts: tuple[AttachedArtifact, ...] = ()
 
 
 def log_cut_from_state(state: Mapping[str, Any] | None) -> LogCut | None:
@@ -133,6 +143,53 @@ def _mode_update(notification: Mapping[str, Any]) -> str | None:
     return mode if isinstance(mode, str) and mode else None
 
 
+def _is_user_entry(notification: Mapping[str, Any]) -> bool:
+    method = notification.get("method")
+    if method == "_posthog/user_message":
+        return True
+    return method == "session/update" and _session_update(notification).get("sessionUpdate") in (
+        "user_message",
+        "user_message_chunk",
+    )
+
+
+def _content_blocks(notification: Mapping[str, Any]) -> list[object]:
+    if notification.get("method") == "session/update":
+        content = _session_update(notification).get("content")
+    else:
+        content = _params(notification).get("content")
+    if isinstance(content, list):
+        return content
+    return [content] if isinstance(content, dict) else []
+
+
+def _artifact_from_uri(uri: str) -> AttachedArtifact | None:
+    """The run and artifact a sandbox attachment path names: `.posthog/attachments/<run_id>/<artifact_id>/<name>`."""
+    segments = [segment for segment in (urlparse(uri).path or uri).split("/") if segment]
+    marker = len(segments) - 1 - segments[::-1].index("attachments") if "attachments" in segments else -1
+    if marker < 1 or segments[marker - 1] != ".posthog" or len(segments) < marker + 4:
+        return None
+    return AttachedArtifact(run_id=segments[marker + 1], artifact_id=segments[marker + 2])
+
+
+def _attached_artifacts(entries: Sequence[str]) -> tuple[AttachedArtifact, ...]:
+    """The files of the user message whose entries open ``entries``. Its echo repeats the blocks, so each artifact
+    counts once."""
+    artifacts: dict[str, AttachedArtifact] = {}
+    for line in entries:
+        notification = _notification(line)
+        if not _is_user_entry(notification):
+            break
+        for block in _content_blocks(notification):
+            if not isinstance(block, dict) or block.get("type") not in ("resource_link", "image"):
+                continue
+            uri = block.get("uri")
+            artifact = _artifact_from_uri(uri) if isinstance(uri, str) else None
+            if artifact is not None:
+                artifacts.setdefault(artifact.artifact_id, artifact)
+    return tuple(artifacts.values())
+
+
 def edited_message_at(entries: Sequence[str], index: int) -> EditedMessage | None:
     """The user message that opens a turn at ``index`` of one run's log entries, or ``None`` when the entry
     there is anything else."""
@@ -149,7 +206,7 @@ def edited_message_at(entries: Sequence[str], index: int) -> EditedMessage | Non
     for line in entries[:index]:
         if "current_mode_update" in line and (update := _mode_update(_notification(line))) is not None:
             mode = update
-    return EditedMessage(text=human.text, context=context, mode=mode)
+    return EditedMessage(text=human.text, context=context, mode=mode, artifacts=_attached_artifacts(entries[index:]))
 
 
 def edited_message_content(message: EditedMessage, text: str) -> str:

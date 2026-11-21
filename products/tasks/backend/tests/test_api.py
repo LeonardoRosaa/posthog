@@ -12495,10 +12495,35 @@ class TestTaskRunAPI(BaseTaskAPITest):
         if query:
             self.assertEqual(response["X-Log-Origin"], str(edited.id))
 
+    @staticmethod
+    def _edit_message_attachment(task: Task, run: TaskRun) -> dict:
+        return {
+            "id": "art-chart",
+            "name": "chart.png",
+            "type": "user_attachment",
+            "storage_path": f"tasks/artifacts/team_{task.team_id}/task_{task.id}/run_{run.id}/chart.png",
+            "uploaded_at": "2026-01-01T00:00:00+00:00",
+        }
+
     def _edit_message_fixture(self) -> tuple[Task, TaskRun, TaskRun, dict[str, list[str]]]:
         task = self.create_task()
         first = TaskRun.objects.create(
             task=task, team=self.team, status=TaskRun.Status.COMPLETED, state={"initial_permission_mode": "default"}
+        )
+        first.artifacts = [self._edit_message_attachment(task, first)]
+        first.save(update_fields=["artifacts"])
+        attachment = {
+            "type": "resource_link",
+            "name": "chart.png",
+            "uri": f"file:///tmp/workspace/.posthog/attachments/{first.id}/art-chart/chart.png",
+        }
+        echo = json.dumps(
+            {
+                "notification": {
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "user_message_chunk", "content": attachment}},
+                }
+            }
         )
         latest = TaskRun.objects.create(
             task=task,
@@ -12519,6 +12544,7 @@ class TestTaskRunAPI(BaseTaskAPITest):
             first.log_url: [
                 mode,
                 self._chat_line("user", f"{context}\n\nshow signups"),
+                echo,
                 self._chat_line("agent", "here are signups"),
             ],
             latest.log_url: [self._chat_line("user", "and churn?"), self._chat_line("agent", "here is churn")],
@@ -12561,6 +12587,8 @@ class TestTaskRunAPI(BaseTaskAPITest):
         )
         self.assertEqual(successor.state["initial_permission_mode"], "plan")
         self.assertNotIn("snapshot_external_id", successor.state)
+        self.assertEqual(successor.state["pending_user_artifact_ids"], ["art-chart"])
+        self.assertEqual(successor.artifacts, [self._edit_message_attachment(task, first)])
         mock_workflow.assert_called_once()
 
     @parameterized.expand(
@@ -12593,7 +12621,7 @@ class TestTaskRunAPI(BaseTaskAPITest):
             task,
             latest,
             first,
-            2 if case == "agent_index" else 1,
+            3 if case == "agent_index" else 1,
             "show other things" if case == "other_text" else "show signups",
         )
 

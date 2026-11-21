@@ -10130,13 +10130,15 @@ def run_task(
     free_trial_enabled: bool | None = None,
     only_if_no_runs: bool = False,
     edit_cut: LogCut | None = None,
+    carried_artifacts: Sequence[dict] = (),
 ) -> contracts.TaskRunResult | None:
     """Return None for an inaccessible task, otherwise return its refreshed detail or a structured error.
 
     The caller applies the usage gate. Only server-requested Signals research may set pipeline_rerun.
     With only_if_no_runs, the task lock prevents another first run, after any report admission lock.
     With edit_cut, the run resumes cold from the history before that address, so it never reuses a warm run
-    or a snapshot, which hold the turns after it.
+    or a snapshot, which hold the turns after it. carried_artifacts are manifest entries of earlier runs that
+    the pending message sends again; the run gets its own copy of each.
     """
     from products.signals.backend.facade.report_tasks import (  # noqa: PLC0415 — cross-product read kept off the api import path
         enforce_report_implementation_rerun_cap,
@@ -10455,9 +10457,12 @@ def run_task(
     extra_state: dict | None = None
     if pending_user_message is not None and not is_pi_task:
         extra_state = {"pending_user_message": pending_user_message}
-    if pending_user_artifact_ids and not is_pi_task:
+    carried_artifact_ids = [str(entry["id"]) for entry in carried_artifacts]
+    if (pending_user_artifact_ids or carried_artifact_ids) and not is_pi_task:
         extra_state = extra_state or {}
-        extra_state["pending_user_artifact_ids"] = pending_user_artifact_ids
+        extra_state["pending_user_artifact_ids"] = list(
+            dict.fromkeys([*pending_user_artifact_ids, *carried_artifact_ids])
+        )
     for key, value in (
         ("client_platform", validated_data.get("client_platform")),
         ("initial_permission_mode", initial_permission_mode),
@@ -10779,6 +10784,16 @@ def run_task(
             task_run, task, staged_artifacts=staged_artifacts, artifact_ids=pending_user_artifact_ids
         )
 
+    if carried_artifacts and not is_pi_task:
+        manifest = list(task_run.artifacts or [])
+        for entry in carried_artifacts:
+            storage_path = str(entry["storage_path"])
+            if _find_artifact_manifest_entry(manifest, str(entry["id"]), storage_path):
+                continue
+            tag_task_artifact(storage_path, ttl_days=RUN_ARTIFACT_TTL_DAYS, team_id=task.team_id)
+            manifest.append(dict(entry))
+        _save_artifact_manifest(task_run, manifest)
+
     if github_user_token and pr_authorship_mode == PrAuthorshipMode.USER:
         cache_github_user_token(str(task_run.id), github_user_token)
 
@@ -10858,8 +10873,9 @@ def edit_task_run_message(
     newer_runs = task.runs.filter(team_id=team_id, created_at__gt=run.created_at).only("id", "state")
     if not all(_is_idle_warm_run(newer_run) for newer_run in newer_runs):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    chain = run.get_history_chain()
     segment = next(
-        (segment for segment in history_segments(run.get_history_chain()) if str(segment.run.id) == message_run_id),
+        (segment for segment in history_segments(chain) if str(segment.run.id) == message_run_id),
         None,
     )
     if segment is None or (segment.end is not None and index >= segment.end):
@@ -10876,12 +10892,21 @@ def edit_task_run_message(
     mode = message.mode or (segment.run.state or {}).get("initial_permission_mode")
     if mode in ALL_INITIAL_PERMISSION_MODE_CHOICES:
         validated_data["initial_permission_mode"] = mode
+    # The agent reads a file only from its own run's manifest, so the successor gets a copy of each entry.
+    manifests = {str(chain_run.id): chain_run.artifacts or [] for chain_run in chain}
+    carried_artifacts = [
+        entry
+        for artifact in message.artifacts
+        for entry in manifests.get(artifact.run_id, [])
+        if entry.get("id") == artifact.artifact_id and entry.get("storage_path")
+    ]
     result = run_task(
         task.id,
         team_id,
         user_id,
         validated_data=validated_data,
         edit_cut=LogCut(run_id=message_run_id, index=index),
+        carried_artifacts=carried_artifacts,
     )
     return contracts.TaskRunMessageEditResult(run=result) if result is not None else None
 

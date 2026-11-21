@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 from parameterized import parameterized
 
 from products.tasks.backend.logic.message_edit import (
+    AttachedArtifact,
     EditedMessage,
     edited_message_at,
     edited_message_content,
@@ -23,6 +24,10 @@ def _session_update(update: dict) -> str:
 
 
 CONTEXT = "<posthog_untrusted_context>\ninsight abc\n</posthog_untrusted_context>"
+
+
+def _attachment(kind: str, run_id: str, artifact_id: str) -> dict:
+    return {"type": kind, "uri": f"file:///tmp/workspace/.posthog/attachments/{run_id}/{artifact_id}/chart.png"}
 
 
 class TestHistorySegments(SimpleTestCase):
@@ -92,6 +97,41 @@ class TestEditedMessageAt(SimpleTestCase):
                 [_user_message("You are resuming a previous conversation. Earlier turns follow.")],
                 0,
                 None,
+            ),
+            (
+                "collects_the_files_of_the_message_and_its_echo_once",
+                [
+                    _user_message([{"type": "text", "text": "hello"}, _attachment("resource_link", "run-a", "art-1")]),
+                    _session_update(
+                        {
+                            "sessionUpdate": "user_message_chunk",
+                            "content": _attachment("resource_link", "run-a", "art-1"),
+                        }
+                    ),
+                    _session_update(
+                        {"sessionUpdate": "user_message_chunk", "content": _attachment("image", "run-a", "art-2")}
+                    ),
+                    _session_update(
+                        {
+                            "sessionUpdate": "user_message_chunk",
+                            "content": {"type": "resource_link", "uri": "file:///repo/notes.md"},
+                        }
+                    ),
+                    _session_update(
+                        {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}
+                    ),
+                    _user_message([{"type": "text", "text": "next"}, _attachment("resource_link", "run-a", "art-3")]),
+                ],
+                0,
+                EditedMessage(
+                    text="hello",
+                    context="",
+                    mode=None,
+                    artifacts=(
+                        AttachedArtifact(run_id="run-a", artifact_id="art-1"),
+                        AttachedArtifact(run_id="run-a", artifact_id="art-2"),
+                    ),
+                ),
             ),
             ("index_past_the_log", [_user_message("hello")], 1, None),
         ]
