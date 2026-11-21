@@ -2,7 +2,7 @@ import './quillProse.scss'
 
 import { memo, type ReactNode, useContext, useEffect, useRef, useState } from 'react'
 
-import { IconChevronDown } from '@posthog/icons'
+import { IconChevronDown, IconPencil } from '@posthog/icons'
 import {
     ChatBubble,
     ChatBubbleContent,
@@ -21,7 +21,7 @@ import { ThreadAttachments } from '../ThreadAttachments'
 import { TurnRevealContext } from '../TurnRevealContext'
 import { footerRevealProps } from './footerReveal'
 import { renderQuillCodeBlock } from './QuillCodeBlock'
-import { QuillCopyButton } from './QuillFooterButton'
+import { QuillCopyButton, QuillFooterButton } from './QuillFooterButton'
 import { QuillFooterTimestamp } from './QuillFooterTimestamp'
 import { QUILL_MARKDOWN_COMPONENTS } from './quillMarkdownComponents'
 
@@ -87,6 +87,8 @@ export interface QuillHumanBubbleProps {
     startedAt?: number
     /** Rendered above the bubble, right-aligned: attachments, a context summary. */
     before?: ReactNode
+    /** Opens the editor for this message. Omit to hide the edit button. */
+    onEdit?: () => void
     className?: string
     children: ReactNode
 }
@@ -99,6 +101,7 @@ export function QuillHumanBubble({
     copyText,
     startedAt,
     before,
+    onEdit,
     className,
     children,
 }: QuillHumanBubbleProps): JSX.Element {
@@ -112,7 +115,7 @@ export function QuillHumanBubble({
                         <ClampedContent>{children}</ClampedContent>
                     </ChatBubbleContent>
                 </ChatBubble>
-                {(startedAt !== undefined || copyText) && (
+                {(startedAt !== undefined || copyText || onEdit) && (
                     <ChatMessageFooter {...footerRevealProps(revealed, 'items-center gap-1', { reserveSpace: true })}>
                         {startedAt !== undefined && <QuillFooterTimestamp time={startedAt} />}
                         {copyText && (
@@ -121,6 +124,15 @@ export function QuillHumanBubble({
                                 label="Copy message"
                                 dataAttr="posthog-ai-human-message-copy"
                             />
+                        )}
+                        {onEdit && (
+                            <QuillFooterButton
+                                label="Edit message"
+                                onClick={onEdit}
+                                dataAttr="posthog-ai-human-message-edit"
+                            >
+                                <IconPencil />
+                            </QuillFooterButton>
                         )}
                     </ChatMessageFooter>
                 )}
@@ -160,13 +172,20 @@ export function QuillAssistantMarkdown({ content, id }: { content: string; id: s
     )
 }
 
-export const QuillHumanMessage = memo(function QuillHumanMessage({ item }: { item: ThreadItem }): JSX.Element {
+export const QuillHumanMessage = memo(function QuillHumanMessage({
+    item,
+    onEdit,
+}: {
+    item: ThreadItem
+    onEdit?: () => void
+}): JSX.Element {
     const text = userMessageDisplayText(item.text ?? '')
     const screenshotNames = commentScreenshotNames(item.text ?? '')
     return (
         <QuillHumanBubble
             copyText={text || undefined}
             startedAt={item.startedAt}
+            onEdit={onEdit}
             before={
                 item.attachments ? (
                     <ThreadAttachments attachments={item.attachments} badgeNames={screenshotNames} />

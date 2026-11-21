@@ -43,6 +43,8 @@ export { DEFAULT_SUGGESTIONS_DATA } from '../components/suggestions/suggestionsD
 // atoms); `ThreadView` is the prepackaged virtualized presenter (also `Thread.Root`).
 export { Thread } from '../components/Thread'
 export { ThreadView } from '../components/ThreadView'
+// A host whose user may edit the messages they sent wraps the thread in this, with its stream key.
+export { MessageEditingContext } from '../components/MessageEditingContext'
 export { useQuillThread } from '../components/quill/quillThreadContext'
 
 // The quill thread skin for a thread `ThreadView` does not render (the legacy chat behind `today-rail-nav`):

@@ -2755,6 +2755,15 @@ export interface runStreamLogicActions {
     appendResumeBoundary: () => {
         value: true
     }
+    attachEditedRun: (
+        taskId: string,
+        run: TaskRunDetailDTOApi,
+        message: string
+    ) => {
+        message: string
+        run: TaskRunDetailDTOApi
+        taskId: string
+    }
     attachOptimisticResume: (
         taskId: string,
         run: TaskRunDetailDTOApi
@@ -3360,6 +3369,7 @@ export const runStreamLogic = kea<runStreamLogicType>([
         appendResumeBoundary: true,
         rollbackOptimisticResume: true,
         attachOptimisticResume: (taskId: string, run: TaskRunDetailDTOApi) => ({ taskId, run }),
+        attachEditedRun: (taskId: string, run: TaskRunDetailDTOApi, message: string) => ({ taskId, run, message }),
         prepareResumeRun: true,
         /** Injects a client-side error (terminal failure / stream disconnect) into the log as a `client`-sourced entry. */
         pushErrorItem: (errorMessage: string, variant: 'error' | 'crash' = 'error') => ({ errorMessage, variant }),
@@ -5813,6 +5823,13 @@ export const runStreamLogic = kea<runStreamLogicType>([
                     justCreatedRun: resume.historyComplete,
                     ...(!resume.historyComplete ? { retainedMessage: resume.message } : {}),
                 })
+            },
+            attachEditedRun: ({ taskId, run, message }) => {
+                // The edited run shares no indexes with the loaded log, so the thread loads again from the new run.
+                const pagedHistory = values.pagedHistory
+                actions.reset()
+                actions.mergeRunArtifacts(extractRunArtifacts(run))
+                actions.bootstrapRun({ taskId, runId: run.id, retainedMessage: message, pagedHistory })
             },
             pushHumanMessage: ({ content, stagedAttachments }) => {
                 // The echo is always a live turn (replayed human turns render straight from the log), so

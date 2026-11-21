@@ -7,6 +7,7 @@ import { userLogic } from 'scenes/userLogic'
 import type { AttachedContextItem } from '~/layout/ai/attachedContext'
 
 import { runInteractionLogic, type RunInteractionLogicProps } from 'products/posthog_ai/frontend/api/logics'
+import { MessageEditingContext } from 'products/posthog_ai/frontend/api/primitives'
 // Eager, NOT the lazy `api/readableRun` facade: the runner scene is already a route-split chunk and the run
 // surface is its primary content, so a second `lazy()` would only add a redundant chunk fetch + Suspense
 // flash. The inbox embeds keep the lazy `ReadonlyRunSurface`.
@@ -68,6 +69,7 @@ export function TaskRunChat({
     // Staff can view tasks they don't own (support/debugging); those are read-only — hide the composer so
     // they can't try to drive a run they can't control (the backend rejects the write anyway).
     const readOnly = !!user?.is_staff && !!task?.created_by && task.created_by.id !== user.id
+    const isTaskCreator = !!user && task?.created_by?.id === user.id
     // The scene logic is keyed by task, so `selectedRun` can name a different run than this surface renders
     // — the side panel opens `task.latest_run` while the page follows a `?runId=` link or a newer run. Read
     // the run's setup only when the two agree; a mismatch would launch the successor on another run's config.
@@ -121,6 +123,7 @@ export function TaskRunChat({
             <TaskRunChatContent
                 logicProps={logicProps}
                 readOnly={readOnly}
+                canEditMessages={isTaskCreator && !readOnly}
                 escapeScope={escapeScope}
                 autoFocus={autoFocus}
                 flushDraftRef={flushDraftRef}
@@ -134,6 +137,7 @@ export function TaskRunChat({
 function TaskRunChatContent({
     logicProps,
     readOnly,
+    canEditMessages,
     escapeScope,
     autoFocus,
     flushDraftRef,
@@ -142,6 +146,7 @@ function TaskRunChatContent({
 }: {
     logicProps: RunInteractionLogicProps
     readOnly: boolean
+    canEditMessages: boolean
     escapeScope: RunEscapeBoundaryProps['scope']
     autoFocus?: boolean
     flushDraftRef: MutableRefObject<() => void>
@@ -160,6 +165,12 @@ function TaskRunChatContent({
     // foreground stream (same key resolution as `RunSurface.Root`). A read-only staff view omits the
     // composer and could never answer a forced prompt, so it stays a background consumer.
     useForegroundStream(readOnly ? null : (logicProps.streamKey ?? logicProps.runId))
+    const streamKey = logicProps.streamKey ?? logicProps.runId
+    const { onRunStarted } = logicProps
+    const messageEditing = useMemo(
+        () => (canEditMessages ? { streamKey, onRunStarted } : null),
+        [canEditMessages, streamKey, onRunStarted]
+    )
     return (
         // `RunSurface.Root` and `runInteractionLogic` deliberately share the same stream key (`streamKey ?? runId`,
         // resolved inside each): the composer slot's gating must read the exact stream the thread renders. The
@@ -179,12 +190,14 @@ function TaskRunChatContent({
                 disabled={readOnly}
                 className={cn('@container/thread flex flex-col h-full', skin === 'lemon' && '-mx-4')}
             >
-                <RunSurface.Thread
-                    restoreReadPosition
-                    className="flex-1 min-h-0"
-                    listClassName="py-4"
-                    rowClassName="px-4"
-                />
+                <MessageEditingContext.Provider value={messageEditing}>
+                    <RunSurface.Thread
+                        restoreReadPosition
+                        className="flex-1 min-h-0"
+                        listClassName="py-4"
+                        rowClassName="px-4"
+                    />
+                </MessageEditingContext.Provider>
                 {/* Stay live (stream keeps flowing) but omit the composer entirely for a read-only viewer. */}
                 {!readOnly && (
                     <RunSurface.Composer

@@ -18,6 +18,7 @@ import { NotFound } from 'lib/components/NotFound'
 import { useFeatureFlag } from 'lib/hooks/useFeatureFlag'
 import { cn } from 'lib/utils/css-classes'
 import { sceneLogic } from 'scenes/sceneLogic'
+import { userLogic } from 'scenes/userLogic'
 
 import { SIDE_PANEL_PANEL_ID } from '~/layout/ai/aiPanelIds'
 import {
@@ -42,6 +43,7 @@ import {
     AssistantFailureMessage,
     ContextUsageChip,
     MarkdownMessage,
+    MessageEditingContext,
     MessageTemplate,
     QuillAssistantBubble,
     QuillAssistantMarkdown,
@@ -146,6 +148,14 @@ export function Thread({ compact = false }: { compact?: boolean }): JSX.Element 
         quill ? (compact ? 'py-1' : 'py-3') : compact ? 'p-1' : 'p-3'
     )
 
+    // The sandbox task belongs to the person who started the conversation, and only they may edit its messages.
+    const { user } = useValues(userLogic)
+    const canEditMessages = !!user && !!conversation?.user && conversation.user.uuid === user.uuid
+    const messageEditing = useMemo(
+        () => (canEditMessages && sandboxConversationKey ? { streamKey: sandboxConversationKey } : null),
+        [canEditMessages, sandboxConversationKey]
+    )
+
     // Feedback identity: always the task, matching `$ai_session_id` on other surfaces.
     const feedbackTaskId = conversation?.task?.id
     // Stable identity so the memoized trailer rows don't re-render on every streamed frame.
@@ -171,7 +181,9 @@ export function Thread({ compact = false }: { compact?: boolean }): JSX.Element 
                     props={{ streamKey: sandboxConversationKey, conversationId: sandboxConversationKey }}
                 >
                     {/* The live Max column owns scroll via ThreadAutoScroller — render rows in flow, not virtualized. */}
-                    <ThreadView virtualized={false} renderTurnTrailer={renderTurnTrailer} skin={threadSkin} />
+                    <MessageEditingContext.Provider value={messageEditing}>
+                        <ThreadView virtualized={false} renderTurnTrailer={renderTurnTrailer} skin={threadSkin} />
+                    </MessageEditingContext.Provider>
                 </BindLogic>
             </div>
         )
@@ -199,7 +211,9 @@ export function Thread({ compact = false }: { compact?: boolean }): JSX.Element 
                     logic={runStreamLogic}
                     props={{ streamKey: sandboxConversationKey, conversationId: sandboxConversationKey }}
                 >
-                    <ThreadView virtualized={false} renderTurnTrailer={renderTurnTrailer} skin={threadSkin} />
+                    <MessageEditingContext.Provider value={messageEditing}>
+                        <ThreadView virtualized={false} renderTurnTrailer={renderTurnTrailer} skin={threadSkin} />
+                    </MessageEditingContext.Provider>
                 </BindLogic>
             </>
         )
