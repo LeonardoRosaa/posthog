@@ -137,6 +137,21 @@ export interface ThreadAttachment {
     previewId?: string
 }
 
+/**
+ * Where a message sits in a sandbox run's log: the run whose own log holds it, and its line index in that log.
+ * A run log is append-only, so the address never shifts, and it does not depend on how much of the chain was read.
+ */
+export interface RunLogAddress {
+    runId: string
+    index: number
+}
+
+/** Where one run's own log starts in the joined log of a resume chain, as the logs endpoint's `X-Log-Runs` says. */
+export interface RunLogStart {
+    runId: string
+    start: number
+}
+
 export type ThreadItemType =
     | 'human_message'
     | 'assistant_message'
@@ -168,6 +183,11 @@ export interface ThreadItem {
     text?: string
     /** For `human_message` items — the files the send carried. */
     attachments?: ThreadAttachment[]
+    /**
+     * For `human_message` items — the log entry that opened the turn, which an edit points at. Absent while no
+     * read of the log has placed the message: a send in flight, a frame from the live Redis tail, or a Pi run.
+     */
+    logAddress?: RunLogAddress
     /** Whether the assistant message buffer is finalized. */
     complete?: boolean
     /** For `tool_invocation` items — the keyed tool call id (look up in `toolInvocations`). */

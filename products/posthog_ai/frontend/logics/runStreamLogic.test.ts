@@ -258,6 +258,7 @@ describe('runStreamLogic', () => {
                 turnsBefore: 0,
                 origin: '',
                 indexed: false,
+                runs: [],
             }
         })
         jest.mocked(turnSuggestionsStateRetrieve).mockReset().mockResolvedValue({ muted: false, resolved_turns: [] })
@@ -3656,6 +3657,82 @@ describe('runStreamLogic', () => {
             }
         })
 
+        it('addresses a message from the stream backlog in its own run log, apart from an earlier send of its text', async () => {
+            jest.mocked(tasksRunsRetrieve).mockResolvedValue({
+                status: 'in_progress',
+                state: { resume_from_run_id: 'run-1' },
+            } as unknown as TaskRunDetailDTOApi)
+            const sent = notification('_posthog/user_message', { content: 'Same question' })
+            const echo = sessionUpdate({
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'Same question' },
+            })
+            const firstRun = [
+                notification('_posthog/run_started', { runId: 'run-1' }),
+                sent,
+                echo,
+                notification('_posthog/turn_complete', {}),
+            ]
+            jest.spyOn(api.tasks.runs, 'getLogPage').mockResolvedValue({
+                entries: firstRun,
+                offset: 0,
+                count: firstRun.length,
+                preamble: 0,
+                turnsBefore: 0,
+                origin: '',
+                indexed: false,
+                runs: [
+                    { runId: 'run-1', start: 0 },
+                    { runId: 'run-2', start: firstRun.length },
+                ],
+            })
+            logic.actions.bootstrapRun({ taskId: 'task-1', runId: 'run-2' })
+            await flushPromises()
+            await MockStream.latest().emitMessage(notification('_posthog/run_started', { runId: 'run-2' }), 'log-4')
+            await MockStream.latest().emitMessage(sent, 'log-5')
+            await MockStream.latest().emitMessage(echo, 'log-6')
+            expect(
+                logic.values.threadItems
+                    .filter((item) => item.type === 'human_message')
+                    .map(({ text, logAddress }) => [text, logAddress])
+            ).toEqual([
+                ['Same question', { runId: 'run-1', index: 1 }],
+                ['Same question', { runId: 'run-2', index: 1 }],
+            ])
+        })
+
+        it('addresses a message streamed from the live tail once the finished run is read again', async () => {
+            const sent = notification('_posthog/user_message', { content: 'Live question' })
+            const done = notification('_posthog/turn_complete', {})
+            const started = notification('_posthog/run_started', { runId: 'run-1' })
+            const read = (entries: StoredLogEntry[]): HistoryPage => ({
+                entries,
+                offset: 0,
+                count: entries.length,
+                preamble: 0,
+                turnsBefore: 0,
+                origin: '',
+                indexed: false,
+                runs: [{ runId: 'run-1', start: 0 }],
+            })
+            const humans = (): [string | undefined, unknown][] =>
+                logic.values.threadItems
+                    .filter((item) => item.type === 'human_message')
+                    .map(({ text, logAddress }) => [text, logAddress])
+            const getLogPage = jest.spyOn(api.tasks.runs, 'getLogPage').mockResolvedValue(read([started]))
+            logic.actions.bootstrapRun({ taskId: 'task-1', runId: 'run-1' })
+            await flushPromises()
+            await MockStream.latest().emitMessage(sent, '100-0')
+            expect(humans()).toEqual([['Live question', undefined]])
+
+            getLogPage.mockResolvedValue(read([started, sent, done]))
+            await MockStream.latest().emitMessage(done, '101-0')
+            await MockStream.latest().emitStreamEnd()
+            await flushPromises()
+
+            expect(humans()).toEqual([['Live question', { runId: 'run-1', index: 1 }]])
+        })
+
         it('reconciles coalesced backlog frames that arrive after the history request', async () => {
             jest.mocked(api.tasks.runs.getLogEntries).mockResolvedValue([chunk('a', 'boot-1')])
             logic.actions.bootstrapRun({ taskId: 'task-1', runId: 'run-1' })
@@ -5328,7 +5405,7 @@ describe('runStreamLogic', () => {
             preamble = 0,
             turnsBefore = 0,
             origin = 'run-1'
-        ): HistoryPage => ({ entries, offset, count, preamble, turnsBefore, origin, indexed: true })
+        ): HistoryPage => ({ entries, offset, count, preamble, turnsBefore, origin, indexed: true, runs: [] })
         const turn = (text: string, eventId: string): StoredLogEntry => ({
             ...sessionUpdate({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text } }),
             event_id: eventId,
@@ -5340,6 +5417,14 @@ describe('runStreamLogic', () => {
         const texts = (items: ThreadItem[]): string[] =>
             items.flatMap((item) => ('text' in item && typeof item.text === 'string' ? [item.text] : []))
         const isHuman = (item: ThreadItem): boolean => item.type === 'human_message'
+        const persistedText = (entry: StoredLogEntry | undefined): string | undefined => {
+            const params = entry?.notification.params
+            if (entry?.notification.method === '_posthog/user_message') {
+                return typeof params?.content === 'string' ? params.content : undefined
+            }
+            const update = params?.update as { sessionUpdate?: string; content?: { text?: string } } | undefined
+            return update?.sessionUpdate === 'user_message_chunk' ? update.content?.text : undefined
+        }
 
         it.each(logPageFixtures.cases)(
             'shows page by page what the full log shows: $name',
@@ -5350,6 +5435,17 @@ describe('runStreamLogic', () => {
                         ?.runId
                 )
                 const olderPages = new Map(pages.slice(1).map((older, index) => [pages[index].offset, older]))
+                const runLogs = parts as unknown as StoredLogEntry[][]
+                const runIds = runLogs.map((part) =>
+                    String(
+                        part.find((entry) => entry.notification.method === '_posthog/run_started')?.notification.params
+                            ?.runId
+                    )
+                )
+                const runs = runIds.map((id, index) => ({
+                    runId: id,
+                    start: runLogs.slice(0, index).reduce((start, part) => start + part.length, 0),
+                }))
                 jest.mocked(tasksRunsRetrieve).mockResolvedValue({
                     status: 'completed',
                     state: parts.length > 1 ? { resume_from_run_id: 'run-1' } : {},
@@ -5370,6 +5466,7 @@ describe('runStreamLogic', () => {
                               turnsBefore: golden.turns_before,
                               origin: 'run-1',
                               indexed: true,
+                              runs,
                           }
                         : {
                               entries: log,
@@ -5379,6 +5476,7 @@ describe('runStreamLogic', () => {
                               turnsBefore: 0,
                               origin: '',
                               indexed: false,
+                              runs,
                           }
                 })
                 const full = runStreamLogic({ streamKey: 'full-read' })
@@ -5391,6 +5489,36 @@ describe('runStreamLogic', () => {
                     await flushPromises()
                     const fullItems = full.values.threadItems
                     const fullTurns = new Map(fullItems.filter(isHuman).map((item, index) => [item.id, index]))
+                    // Each message points at the first copy of its text in its turn, in its own run's log.
+                    const firstCopyInTurn = (
+                        runLog: StoredLogEntry[],
+                        text: string | undefined,
+                        at: number
+                    ): number => {
+                        const turnStart =
+                            runLog.findLastIndex(
+                                (entry, index) => index < at && entry.notification.method === '_posthog/turn_complete'
+                            ) + 1
+                        return runLog.findIndex((entry, index) => index >= turnStart && persistedText(entry) === text)
+                    }
+                    const humans = fullItems.filter(isHuman)
+                    expect(
+                        humans.map(({ logAddress }) => {
+                            const runLog = logAddress ? runLogs[runIds.indexOf(logAddress.runId)] : undefined
+                            return runLog && logAddress
+                                ? [persistedText(runLog[logAddress.index]), logAddress.index]
+                                : null
+                        })
+                    ).toEqual(
+                        humans.map(({ text, logAddress }) => [
+                            text,
+                            firstCopyInTurn(
+                                runLogs[runIds.indexOf(logAddress?.runId ?? '')] ?? [],
+                                text,
+                                logAddress?.index ?? 0
+                            ),
+                        ])
+                    )
                     for (;;) {
                         const shown = paged.values.threadItems
                         expect(shown).toEqual(fullItems.slice(fullItems.length - shown.length))

@@ -38,6 +38,7 @@ describe('ThreadView connection state', () => {
                 turnsBefore: 0,
                 origin: '',
                 indexed: false,
+                runs: [],
             }
         })
         logic = runStreamLogic(props)

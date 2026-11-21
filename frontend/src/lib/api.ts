@@ -5168,7 +5168,8 @@ const api = {
              * that index on. The page starts with `preamble` earlier entries that still set run state; `offset` is
              * the full-log index of the first entry after them, `count` is the full-log size, and `turnsBefore`
              * counts the user turns before `offset`. Without `tailBytes`, or for a log the server does not page, the
-             * response is the full log and `indexed` is false.
+             * response is the full log and `indexed` is false. `runs` says where each run's own log starts in the
+             * full log, oldest run first, on full reads too; it is empty for a log the server cannot index (Pi).
              */
             async getLogPage(
                 taskId: Task['id'],
@@ -5189,6 +5190,7 @@ const api = {
                 turnsBefore: number
                 origin: string
                 indexed: boolean
+                runs: { runId: string; start: number }[]
             }> {
                 const response = await new ApiRequest()
                     .taskRun(taskId, runId, options.projectId)
@@ -5203,6 +5205,12 @@ const api = {
                 const entries = parseLogEntries(await response.text())
                 const indexed = response.headers.get('X-Log-Offset') !== null
                 const header = (name: string): number => Number(response.headers.get(name) ?? 0) || 0
+                const runs = (response.headers.get('X-Log-Runs') ?? '').split(',').flatMap((pair) => {
+                    const separator = pair.lastIndexOf(':')
+                    const runId = pair.slice(0, separator).trim()
+                    const start = Number(pair.slice(separator + 1))
+                    return separator > 0 && runId && Number.isSafeInteger(start) && start >= 0 ? [{ runId, start }] : []
+                })
                 return {
                     entries,
                     offset: header('X-Log-Offset'),
@@ -5211,6 +5219,7 @@ const api = {
                     turnsBefore: header('X-Log-Turns-Before'),
                     origin: response.headers.get('X-Log-Origin') ?? '',
                     indexed,
+                    runs,
                 }
             },
             /**

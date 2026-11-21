@@ -58,6 +58,8 @@ import type {
     ProgressStatus,
     ProgressStep,
     RunConnectionState,
+    RunLogAddress,
+    RunLogStart,
     RunTerminalStatus,
     SdkSession,
     StagedAttachment,
@@ -615,6 +617,8 @@ export interface HistoryPage {
     origin: string
     /** False for a full log sent without paging headers: its entries carry no full-log index. */
     indexed: boolean
+    /** Where each run's own log starts in the full log; empty for a log the server cannot index. */
+    runs: RunLogStart[]
 }
 
 /**
@@ -629,12 +633,24 @@ export interface HistoryCursor {
     turnsBefore: number
 }
 
-/** Stream backlog entries (`log-N` frames) by their full-log index. */
-const backlogIndexes = new WeakMap<StoredLogEntry, number>()
+/**
+ * Entries by their full-log index, the index in the joined log of the run's resume chain: saved entries from a read,
+ * and stream backlog entries from their `log-N` frame ids. A preamble entry or a live-tail frame has none.
+ */
+const logIndexes = new WeakMap<StoredLogEntry, number>()
+
+function runLogAddress(entry: StoredLogEntry, runs: readonly RunLogStart[] | undefined): RunLogAddress | undefined {
+    const index = logIndexes.get(entry)
+    if (index === undefined || !runs) {
+        return undefined
+    }
+    const run = runs.findLast(({ start }) => start <= index)
+    return run ? { runId: run.runId, index: index - run.start } : undefined
+}
 
 /** Whether a stream backlog entry is already in the loaded log, or in an older page before it. */
 function isLoadedBacklog(entry: StoredLogEntry, loadedEnd: number | undefined): boolean {
-    const index = backlogIndexes.get(entry)
+    const index = logIndexes.get(entry)
     return index !== undefined && loadedEnd !== undefined && index < loadedEnd
 }
 
@@ -696,19 +712,24 @@ function historyContextLines(entries: StoredLogEntry[]): string[] {
 
 /**
  * `preamble` counts the leading entries that came in a page's preamble. `sourceRunId` names the run that owns the
- * entries before the first run marker, for a read that continues a loaded log.
+ * entries before the first run marker, for a read that continues a loaded log. `offset` is the full-log index of the
+ * first entry after the preamble.
  */
 function normalizeHistory(
     entries: unknown[],
     runId: string,
     resumed: boolean,
     preamble = 0,
-    sourceRunId?: string
+    sourceRunId?: string,
+    offset = 0
 ): StoredLogEntry[] {
     // Match Desktop's run-marker scoping without changing the shared log payload or its deduplication keys.
     // A resume chain without a marker has unknown ownership; a single-run history belongs to its requested run.
     let source: string | undefined = sourceRunId ?? (resumed ? undefined : runId)
+    // The server counts every JSON object line, including the ones that are not notifications.
+    let objectIndex = 0
     return entries.flatMap((raw, index) => {
+        const position = isRecord(raw) ? objectIndex++ : undefined
         const entry = normalizeNotificationEntry(raw)
         if (!entry) {
             return []
@@ -726,6 +747,8 @@ function normalizeHistory(
         const normalized = { ...entry, source_run_id: source }
         if (index < preamble) {
             historyPreambles.add(normalized)
+        } else if (position !== undefined) {
+            logIndexes.set(normalized, offset + position - preamble)
         }
         return [normalized]
     })
@@ -1585,6 +1608,7 @@ export function readFullThread(
             isResumeRun: logic.values.isBootstrapResumeRun,
             pendingMessage: logic.values.pendingRunMessage,
             taskId,
+            logRuns: page.runs,
         })
         const showDebugLogs = logic.values.showDebugLogs
         return {
@@ -1842,6 +1866,7 @@ export interface FoldOptions {
     isResumeRun: boolean
     pendingMessage?: PendingRunMessage | null
     taskId?: string | null
+    logRuns?: readonly RunLogStart[]
 }
 
 export interface FoldCheckpoint {
@@ -1879,7 +1904,8 @@ function sameFoldOptions(a: FoldOptions, b: FoldOptions): boolean {
         (a.taskId ?? null) === (b.taskId ?? null) &&
         (a.pendingMessage?.runId ?? null) === (b.pendingMessage?.runId ?? null) &&
         (a.pendingMessage?.id ?? null) === (b.pendingMessage?.id ?? null) &&
-        (a.pendingMessage?.text ?? null) === (b.pendingMessage?.text ?? null)
+        (a.pendingMessage?.text ?? null) === (b.pendingMessage?.text ?? null) &&
+        (a.logRuns ?? null) === (b.logRuns ?? null)
     )
 }
 
@@ -1955,6 +1981,9 @@ export function foldLogFromCheckpoint(
     let timestamp: number | undefined
     let importedRun = resume?.importedRun ?? false
     let entryRunId: string | undefined
+    // Where the entry being folded sits in its run's log. A message takes the address of the entry that opens its turn,
+    // which is its earliest copy in the log: a later wire form of the same send is consumed by the dedupe below.
+    let entryAddress: RunLogAddress | undefined
     // The agent's `event_id` of the entry being folded. Ids built from it stay the same when older history
     // loads in front of the log, where the per-type counters behind the fallback ids would shift.
     let entryKey: string | undefined
@@ -1985,6 +2014,7 @@ export function foldLogFromCheckpoint(
             complete: true,
             ...(carried.length > 0 && { attachments: carried }),
             ...(timestamp !== undefined && { startedAt: timestamp }),
+            ...(entryAddress && { logAddress: entryAddress }),
         }
         if (placement.atFoot) {
             items.push(item)
@@ -2194,6 +2224,9 @@ export function foldLogFromCheckpoint(
             const index = items.findIndex((item) => item.id === waitingId)
             if (index >= items.findLastIndex((item) => item.type === 'turn_separator') + 1) {
                 // The placeholder already sits in this turn, which is where the echo would put it.
+                if (entryAddress && !items[index].logAddress) {
+                    items[index] = { ...items[index], logAddress: entryAddress }
+                }
                 return
             }
             if (index === -1) {
@@ -2269,6 +2302,7 @@ export function foldLogFromCheckpoint(
     for (let index = resume ? resume.entries.length : 0; index < entries.length; index++) {
         const { entry, source } = entries[index]
         entryRunId = entry.source_run_id ?? options.pendingMessage?.runId
+        entryAddress = runLogAddress(entry, options.logRuns)
         const clientId = entry.notification.params?.clientId
         // A saved message that replaces its streamed chunks keeps the first chunk's id, so its row keeps its key.
         const savedKey = savedEntryKey(entry)
@@ -2658,6 +2692,7 @@ export interface runStreamLogicValues {
     latestTurnTraceId: string | null
     log: RunLog
     logBootstrapLoading: boolean
+    logRuns: RunLogStart[]
     olderHistoryState: OlderHistoryState
     pagedHistory: boolean
     pendingPermissionRequest: PermissionRequestRecord | null
@@ -2957,6 +2992,9 @@ export interface runStreamLogicActions {
     setHistoryTurnBase: (base: number) => {
         base: number
     }
+    setLogRuns: (runs: RunLogStart[]) => {
+        runs: RunLogStart[]
+    }
     setOlderHistoryState: (state: OlderHistoryState) => {
         state: OlderHistoryState
     }
@@ -3021,7 +3059,8 @@ export interface runStreamLogicMeta {
             log: RunLog,
             isBootstrapResumeRun: boolean,
             pendingRunMessage: PendingRunMessage | null,
-            bootstrappedTaskId: string | null
+            bootstrappedTaskId: string | null,
+            logRuns: RunLogStart[]
         ) => FoldedThread
         errorTraceIds: (threadItems: ThreadItem[]) => Map<string, string>
         turnSuggestionsMuted: (
@@ -3140,6 +3179,7 @@ export const runStreamLogic = kea<runStreamLogicType>([
         setHistoryComplete: (complete: boolean) => ({ complete }),
         setOlderHistoryState: (state: OlderHistoryState) => ({ state }),
         setHistoryTurnBase: (base: number) => ({ base }),
+        setLogRuns: (runs: RunLogStart[]) => ({ runs }),
         loadOlderHistory: true,
         setStreamHasEnded: (ended: boolean) => ({ ended }),
         recoveryProgress: (phase: RecoveryPhase, attempt: number, maxAttempts: number) => ({
@@ -3348,6 +3388,18 @@ export const runStreamLogic = kea<runStreamLogicType>([
             {
                 setHistoryTurnBase: (_, { base }) => base,
                 reset: () => 0,
+            },
+        ],
+        logRuns: [
+            [] as RunLogStart[],
+            {
+                // A read of an unchanged chain keeps the same array, so the fold keeps its checkpoint.
+                setLogRuns: (state, { runs }) =>
+                    state.length === runs.length &&
+                    state.every((run, index) => run.runId === runs[index].runId && run.start === runs[index].start)
+                        ? state
+                        : runs,
+                reset: () => [],
             },
         ],
         olderHistoryState: [
@@ -3800,17 +3852,18 @@ export const runStreamLogic = kea<runStreamLogicType>([
          * Memoized on `log` identity, so it recomputes only when a frame is actually appended.
          */
         foldedThread: [
-            (s) => [s.log, s.isBootstrapResumeRun, s.pendingRunMessage, s.bootstrappedTaskId],
+            (s) => [s.log, s.isBootstrapResumeRun, s.pendingRunMessage, s.bootstrappedTaskId, s.logRuns],
             (
                 log: RunLog,
                 isResumeRun: boolean,
                 pendingMessage: PendingRunMessage | null,
-                taskId: string | null
+                taskId: string | null,
+                logRuns: RunLogStart[]
             ): FoldedThread => {
                 const previousCheckpoint: FoldCheckpoint | null = cache.foldCheckpoint ?? null
                 const { folded, checkpoint } = foldLogFromCheckpoint(
                     log.entries,
-                    { isResumeRun, pendingMessage, taskId },
+                    { isResumeRun, pendingMessage, taskId, logRuns },
                     previousCheckpoint
                 )
                 const previous: FoldedThread | undefined = cache.previousFoldedThread
@@ -4383,7 +4436,8 @@ export const runStreamLogic = kea<runStreamLogicType>([
                 session.runId,
                 values.isBootstrapResumeRun,
                 page.preamble,
-                kept[kept.length - 1]?.entry.source_run_id
+                kept[kept.length - 1]?.entry.source_run_id,
+                page.offset
             )
             const echo = cache.retainedMessage
                 ? values.log.entries.findLast(
@@ -4422,6 +4476,7 @@ export const runStreamLogic = kea<runStreamLogicType>([
             }
             const bufferedEntries = new Set(session.buffer)
             const bufferedIds = new Set(session.buffer.flatMap((entry) => (entry.event_id ? [entry.event_id] : [])))
+            actions.setLogRuns(page.runs)
             replayRunLog(
                 log,
                 session.runId,
@@ -5097,7 +5152,7 @@ export const runStreamLogic = kea<runStreamLogicType>([
                         reduceToolResponseCopy(entry)
                         const backlogIndex = id?.startsWith('log-') ? Number(id.slice('log-'.length)) : NaN
                         if (Number.isSafeInteger(backlogIndex)) {
-                            backlogIndexes.set(entry, backlogIndex)
+                            logIndexes.set(entry, backlogIndex)
                         }
                         // An entry the loaded log already holds is not ingested, but it still moves the resume cursor below.
                         const fresh = !isLoadedBacklog(entry, cache.historyEnd as number | undefined)
@@ -5891,7 +5946,9 @@ export const runStreamLogic = kea<runStreamLogicType>([
                         page.entries.slice(0, page.preamble + cursor.offset - page.offset),
                         current.runId,
                         values.isBootstrapResumeRun,
-                        page.preamble
+                        page.preamble,
+                        undefined,
+                        page.offset
                     )
                     const lines = historyContextLines(entries)
                     if (lines.length > 0) {

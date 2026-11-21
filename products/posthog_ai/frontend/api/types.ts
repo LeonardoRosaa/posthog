@@ -5,6 +5,7 @@ export type {
     ContextUsage,
     RunArtifacts,
     ProgressStep,
+    RunLogAddress,
 } from '../types/streamTypes'
 export type { ToolCallMessage } from '../types/toolTypes'
 export type { ReplySuggestions } from '../utils/replySuggestions'

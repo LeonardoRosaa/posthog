@@ -1888,6 +1888,7 @@ describe('maxThreadLogic', () => {
                     turnsBefore: 0,
                     origin: '',
                     indexed: false,
+                    runs: [],
                 })
                 const runSpy = jest
                     .spyOn(tasksApi, 'tasksRunsRetrieve')
