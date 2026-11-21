@@ -12547,7 +12547,13 @@ class TestTaskRunAPI(BaseTaskAPITest):
                 echo,
                 self._chat_line("agent", "here are signups"),
             ],
-            latest.log_url: [self._chat_line("user", "and churn?"), self._chat_line("agent", "here is churn")],
+            latest.log_url: [
+                self._chat_line("user", "and churn?"),
+                self._chat_line("agent", "here is churn"),
+                json.dumps(
+                    {"notification": {"method": "_posthog/turn_complete", "params": {"stopReason": "end_turn"}}}
+                ),
+            ],
         }
         return task, first, latest, logs
 
@@ -12576,18 +12582,27 @@ class TestTaskRunAPI(BaseTaskAPITest):
             state={"prewarmed": True, "await_user_message": True, "resume_from_run_id": str(source.id), **state},
         )
 
-    @parameterized.expand([("without_a_warm_run", False), ("hands_back_the_idle_warm_run", True)])
+    @parameterized.expand(
+        [
+            ("after_a_finished_run", "finished_run"),
+            ("hands_back_the_idle_warm_run", "warm_run"),
+            ("ends_the_live_run_between_turns", "live_run"),
+        ]
+    )
     @patch("products.tasks.backend.facade.cancellation._interrupt_agent_turn")
     @patch("products.tasks.backend.facade.cancellation._signal_complete_task", return_value="signaled")
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     @patch("posthog.storage.object_storage.read")
     def test_edit_message_starts_a_cold_successor_with_the_cut(
-        self, _name: str, with_warm_run: bool, mock_read, mock_workflow, mock_signal, _mock_interrupt
+        self, _name: str, case: str, mock_read, mock_workflow, mock_signal, _mock_interrupt
     ):
         self._enable_edit_flag(True)
         task, first, latest, logs = self._edit_message_fixture()
         mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
-        warm = self._warm_successor(task, latest) if with_warm_run else None
+        stopped = self._warm_successor(task, latest) if case == "warm_run" else None
+        if case == "live_run":
+            TaskRun.objects.filter(id=latest.id).update(status=TaskRun.Status.IN_PROGRESS)
+            stopped = latest
 
         response = self._post_edit(task, latest, first, 1, "show signups")
 
@@ -12604,14 +12619,14 @@ class TestTaskRunAPI(BaseTaskAPITest):
         self.assertEqual(successor.state["pending_user_artifact_ids"], ["art-chart"])
         self.assertEqual(successor.artifacts, [self._edit_message_attachment(task, first)])
         mock_workflow.assert_called_once()
-        if warm is None:
+        if stopped is None:
             mock_signal.assert_not_called()
         else:
-            warm.refresh_from_db()
-            self.assertEqual(warm.state["cancel_source"], "message_edit")
+            stopped.refresh_from_db()
+            self.assertEqual(stopped.state["cancel_source"], "message_edit")
             self.assertEqual(
                 [(call.args[0].id, call.args[1]) for call in mock_signal.call_args_list],
-                [(warm.id, TaskRun.Status.CANCELLED)],
+                [(stopped.id, TaskRun.Status.CANCELLED)],
             )
 
     @parameterized.expand(
@@ -12620,23 +12635,39 @@ class TestTaskRunAPI(BaseTaskAPITest):
             ("not_the_task_creator", "no_creator", status.HTTP_403_FORBIDDEN, "not_task_creator"),
             ("text_does_not_match", "other_text", status.HTTP_409_CONFLICT, "conversation_changed"),
             ("address_is_an_agent_message", "agent_index", status.HTTP_409_CONFLICT, "conversation_changed"),
-            ("run_is_live", "live_run", status.HTTP_409_CONFLICT, "run_active"),
+            ("live_run_is_mid_turn", "mid_turn", status.HTTP_409_CONFLICT, "run_active"),
+            ("live_run_has_a_message_on_its_way", "queued_message", status.HTTP_409_CONFLICT, "run_active"),
+            ("ending_the_live_run_fails", "end_fails", status.HTTP_503_SERVICE_UNAVAILABLE, "run_end_failed"),
             ("a_newer_run_continued_it", "newer_run", status.HTTP_409_CONFLICT, "conversation_changed"),
             ("the_warm_run_took_a_message", "activating_warm_run", status.HTTP_409_CONFLICT, "conversation_changed"),
         ]
     )
+    @patch("products.tasks.backend.facade.cancellation._interrupt_agent_turn")
+    @patch("products.tasks.backend.facade.cancellation._signal_complete_task", return_value="unavailable")
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     @patch("posthog.storage.object_storage.read")
     def test_edit_message_refusals_create_no_run(
-        self, _name: str, case: str, expected_status: int, expected_code: str, mock_read, mock_workflow
+        self,
+        _name: str,
+        case: str,
+        expected_status: int,
+        expected_code: str,
+        mock_read,
+        mock_workflow,
+        _mock_signal,
+        _mock_interrupt,
     ):
         self._enable_edit_flag(case != "flag_off")
         task, first, latest, logs = self._edit_message_fixture()
         mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
         if case == "no_creator":
             Task.objects.filter(id=task.id).update(created_by=None)
-        if case == "live_run":
+        if case in ("mid_turn", "queued_message", "end_fails"):
             TaskRun.objects.filter(id=latest.id).update(status=TaskRun.Status.IN_PROGRESS)
+        if case == "mid_turn":
+            logs[latest.log_url].append(self._chat_line("user", "and retention?"))
+        if case == "queued_message":
+            latest.record_pending_followup_message("msg-1", "and retention?", accepted_at=django_timezone.now())
         if case == "newer_run":
             TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(latest.id)})
         if case == "activating_warm_run":

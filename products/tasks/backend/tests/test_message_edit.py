@@ -11,6 +11,7 @@ from products.tasks.backend.logic.message_edit import (
     edited_message_at,
     edited_message_content,
     history_segments,
+    turn_is_complete,
 )
 from products.tasks.backend.models import TaskRun
 
@@ -149,3 +150,35 @@ class TestEditedMessageAt(SimpleTestCase):
     )
     def test_new_content_keeps_the_context(self, _name: str, message: EditedMessage, expected: str) -> None:
         self.assertEqual(edited_message_content(message, "b"), expected)
+
+
+TURN_COMPLETE = json.dumps({"notification": {"method": "_posthog/turn_complete", "params": {"stopReason": "end_turn"}}})
+
+
+class TestTurnIsComplete(SimpleTestCase):
+    @parameterized.expand(
+        [
+            ("booting_run_has_no_finished_turn", [], False),
+            (
+                "answer_still_streaming",
+                [_user_message("hi"), _session_update({"sessionUpdate": "agent_message"})],
+                False,
+            ),
+            (
+                "turn_completed",
+                [_user_message("hi"), _session_update({"sessionUpdate": "agent_message"}), TURN_COMPLETE],
+                True,
+            ),
+            ("a_follow_up_reopens_the_turn", [_user_message("hi"), TURN_COMPLETE, _user_message("and then?")], False),
+            (
+                "echo_chunk_reopens_the_turn",
+                [
+                    TURN_COMPLETE,
+                    _session_update({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "x"}}),
+                ],
+                False,
+            ),
+        ]
+    )
+    def test_reads_the_last_turn(self, _name: str, entries: list[str], expected: bool) -> None:
+        self.assertEqual(turn_is_complete(entries), expected)

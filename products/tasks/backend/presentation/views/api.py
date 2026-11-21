@@ -3599,6 +3599,10 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
             status.HTTP_409_CONFLICT,
             "Messages in this chat can't be edited.",
         ),
+        tasks_contracts.TaskRunMessageEditRefusal.RUN_END_FAILED: (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Couldn't stop the agent to save your edit. Try again.",
+        ),
     }
 
     @validated_request(
@@ -3619,7 +3623,7 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
             409: OpenApiResponse(
                 response=TaskRunErrorResponseSerializer,
                 description=(
-                    "The run is not finished (code `run_active`), the address does not point at a user message "
+                    "The run is mid-turn or has a message on its way to the agent (code `run_active`), the address does not point at a user message "
                     "with the original text in this run's conversation, or a newer run continued it (code "
                     "`conversation_changed`), or the task's runtime keeps no message addresses (code "
                     "`unsupported_runtime`)"
@@ -3628,10 +3632,15 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
             429: OpenApiResponse(
                 response=TaskRunErrorResponseSerializer, description="Team is over its posthog_code usage limit"
             ),
+            503: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description="A live run could not be ended for the edit (code `run_end_failed`); no run was started",
+            ),
         },
         summary="Edit a sent message",
         description=(
-            "Replace a user message in a finished run's conversation and answer the new text. The server starts a "
+            "Replace a user message in a run's conversation and answer the new text. A live run must be between "
+            "turns, and the server ends it first. The server starts a "
             "successor run whose conversation ends before the edited message, so the message and everything after "
             "it drop out of the logs of the successor and of every run that continues it. The new message keeps "
             "the original's attached context and permission mode. The successor starts in a new sandbox without "

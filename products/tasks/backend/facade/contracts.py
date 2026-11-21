@@ -634,6 +634,7 @@ class TaskRunMessageEditRefusal(StrEnum):
     RUN_ACTIVE = "run_active"
     CONVERSATION_CHANGED = "conversation_changed"
     UNSUPPORTED_RUNTIME = "unsupported_runtime"
+    RUN_END_FAILED = "run_end_failed"
 
 
 @dataclass(frozen=True)

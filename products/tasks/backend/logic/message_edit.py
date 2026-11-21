@@ -153,6 +153,21 @@ def _is_user_entry(notification: Mapping[str, Any]) -> bool:
     )
 
 
+def turn_is_complete(entries: Sequence[str]) -> bool:
+    """Whether the agent finished the last turn in one run's log entries: a turn completion came after the
+    last user message. A log with no completion yet, such as a run still booting, has no finished turn."""
+    complete = False
+    for line in entries:
+        if "turn_complete" not in line and "user_message" not in line:
+            continue
+        notification = _notification(line)
+        if notification.get("method") == "_posthog/turn_complete":
+            complete = True
+        elif _is_user_entry(notification):
+            complete = False
+    return complete
+
+
 def _content_blocks(notification: Mapping[str, Any]) -> list[object]:
     if notification.get("method") == "session/update":
         content = _session_update(notification).get("content")

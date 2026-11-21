@@ -9,7 +9,7 @@ import { tasksRunsEditMessageCreate, tasksRunsRetrieve } from 'products/tasks/fr
 import type { TaskRunDetailDTOApi } from 'products/tasks/frontend/generated/api.schemas'
 
 import type { ThreadItem } from '../types/streamTypes'
-import { messageEditLogic } from './messageEditLogic'
+import { messageEditLogic, runAcceptsEdits } from './messageEditLogic'
 import { runStreamLogic } from './runStreamLogic'
 
 jest.mock('products/tasks/frontend/generated/api', () => ({
@@ -59,6 +59,16 @@ describe('messageEditLogic', () => {
         logic.actions.setDraft('show weekly signups')
         await expectLogic(logic, () => logic.actions.saveEdit(ITEM)).toDispatchActions([outcome])
     }
+
+    it.each([
+        ['a finished run', 'completed', false, true],
+        ['a live run between turns', 'in_progress', true, true],
+        ['a live run mid-turn', 'in_progress', false, false],
+        ['a run still queued', 'queued', false, false],
+        ['no run yet', null, false, false],
+    ] as const)('decides whether %s accepts edits', (_name, runStatus, turnComplete, expected) => {
+        expect(runAcceptsEdits(runStatus, turnComplete)).toBe(expected)
+    })
 
     it('saves the edit at the message address and moves the thread to the new run', async () => {
         const run = { id: 'run-2', task: 'task-1', status: 'queued' } as TaskRunDetailDTOApi

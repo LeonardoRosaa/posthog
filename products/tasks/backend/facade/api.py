@@ -152,6 +152,7 @@ from products.tasks.backend.logic.message_edit import (
     edited_message_content,
     history_segments,
     log_cut_from_state,
+    turn_is_complete,
 )
 from products.tasks.backend.logic.model_access import InvalidModelAccess, resolve_model_access
 from products.tasks.backend.logic.services.gateway_model_pin import GATEWAY_PRODUCT_STATE_KEY, pinned_run_allows_model
@@ -10098,7 +10099,7 @@ def _branches_worked_on(run: TaskRun) -> set[str]:
     return branches
 
 
-def _active_session_cap_refusal(task: Task) -> str | None:
+def _active_session_cap_refusal(task: Task, *, exclude_run_id: str | UUID | None = None) -> str | None:
     from products.tasks.backend.logic.services.warm import (
         SandboxWarmer,  # noqa: PLC0415 — keep warming deps off the api import path
     )
@@ -10110,6 +10111,7 @@ def _active_session_cap_refusal(task: Task) -> str | None:
         task.origin_product,
         organization_id=task.team.organization_id,
         created_by_id=task.created_by_id,
+        exclude_run_id=exclude_run_id,
         signal_report_id=task.signal_report_id,
         task_id=task.id,
     )
@@ -10180,7 +10182,10 @@ def run_task(
             error=contracts.TaskValidationError(kind="detail", detail=REPORT_WARM_RUN_NOT_ACTIVATED)
         )
     if not validated_data.get("scheduled_at"):
-        cap_detail = _active_session_cap_refusal(task)
+        # An edit's successor takes the place of the run it ends, which is still live while it winds down.
+        cap_detail = _active_session_cap_refusal(
+            task, exclude_run_id=validated_data.get("resume_from_run_id") if edit_cut else None
+        )
         if cap_detail is not None:
             return contracts.TaskRunResult(
                 error=contracts.TaskValidationError(kind="detail", detail=cap_detail, code=ACTIVE_SESSION_CAP_CODE)
@@ -10836,25 +10841,31 @@ def _is_idle_warm_run(run: TaskRun) -> bool:
     return state.get("prewarmed") is True and state.get("await_user_message") is True
 
 
-def _release_idle_warm_runs(runs: Sequence[TaskRun], task: Task, team_id: int, user_id: int) -> bool:
-    """Hand back warm runs that idle for the next message of a history an edit replaces. ``False`` when one
-    of them took a message first, so the conversation moved on."""
+def _cancel_for_edit(
+    run: TaskRun, task: Task, team_id: int, user_id: int, *, only_if_awaiting_first_message: bool = False
+) -> str:
     from products.tasks.backend.facade.cancellation import (  # noqa: PLC0415 — cancellation imports this module
         cancel_task_run,
     )
 
-    distinct_id = User.objects.filter(id=user_id).values_list("distinct_id", flat=True).first()
+    outcome, _ = cancel_task_run(
+        run.id,
+        task.id,
+        team_id,
+        reason="A message in this chat was edited",
+        source="message_edit",
+        requested_by_user_id=user_id,
+        requested_by_distinct_id=User.objects.filter(id=user_id).values_list("distinct_id", flat=True).first(),
+        only_if_awaiting_first_message=only_if_awaiting_first_message,
+    )
+    return outcome
+
+
+def _release_idle_warm_runs(runs: Sequence[TaskRun], task: Task, team_id: int, user_id: int) -> bool:
+    """Hand back warm runs that idle for the next message of a history an edit replaces. ``False`` when one
+    of them took a message first, so the conversation moved on."""
     for warm_run in runs:
-        outcome, _ = cancel_task_run(
-            warm_run.id,
-            task.id,
-            team_id,
-            reason="The message it was warmed for was edited",
-            source="message_edit",
-            requested_by_user_id=user_id,
-            requested_by_distinct_id=distinct_id,
-            only_if_awaiting_first_message=True,
-        )
+        outcome = _cancel_for_edit(warm_run, task, team_id, user_id, only_if_awaiting_first_message=True)
         if outcome == "already_activated":
             return False
         if outcome == "unavailable":
@@ -10880,8 +10891,9 @@ def edit_task_run_message(
     The address is the message's run and its index in that run's own log. The successor's history ends before
     the message, and its pending message is ``text`` with the original's context blocks and permission mode.
     A warm run idling for the next message was warmed for the history the edit drops, so the edit hands it
-    back before the successor starts. Every check runs before that, so a refused edit writes nothing. ``None`` when the task
-    or run is not visible.
+    back before the successor starts. A live run whose turn is complete ends first too, because its agent
+    holds the removed turns in memory. Every check runs before either, so a refused edit writes nothing.
+    ``None`` when the task or run is not visible.
     """
     from posthog.storage import object_storage  # noqa: PLC0415 — keep storage deps off the api import path
 
@@ -10896,7 +10908,9 @@ def edit_task_run_message(
         return contracts.TaskRunMessageEditResult(refusal=Refusal.NOT_TASK_CREATOR)
     if task.runtime == Task.Runtime.PI:
         return contracts.TaskRunMessageEditResult(refusal=Refusal.UNSUPPORTED_RUNTIME)
-    if not run.is_terminal:
+    # A live run can be ended for an edit only between turns, once nothing is on its way to the agent.
+    live = not run.is_terminal
+    if live and (run.environment != TaskRun.Environment.CLOUD or run.has_pending_followup_messages):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_ACTIVE)
     # A warm successor idling for the next message holds no turns, so it does not change the conversation.
     newer_runs = list(task.runs.filter(team_id=team_id, created_at__gt=run.created_at).only("id", "state"))
@@ -10909,9 +10923,18 @@ def edit_task_run_message(
     )
     if segment is None or (segment.end is not None and index >= segment.end):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
-    message = edited_message_at(log_entries(object_storage.read(segment.run.log_url, missing_ok=True) or ""), index)
+    entries = log_entries(object_storage.read(segment.run.log_url, missing_ok=True) or "")
+    message = edited_message_at(entries, index)
     if message is None or message.text != original_text.strip():
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    if live:
+        run_entries = (
+            entries
+            if segment.run.id == run.id
+            else log_entries(object_storage.read(run.log_url, missing_ok=True) or "")
+        )
+        if not turn_is_complete(run_entries):
+            return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_ACTIVE)
 
     validated_data: dict[str, Any] = {
         "resume_from_run_id": run.id,
@@ -10931,6 +10954,9 @@ def edit_task_run_message(
     ]
     if newer_runs and not _release_idle_warm_runs(newer_runs, task, team_id, user_id):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    # The live agent holds the removed turns in memory, so it ends, and the successor resumes cold.
+    if live and _cancel_for_edit(run, task, team_id, user_id) not in ("accepted", "already_terminal"):
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_END_FAILED)
     result = run_task(
         task.id,
         team_id,

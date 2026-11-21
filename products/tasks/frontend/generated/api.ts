@@ -2019,7 +2019,7 @@ export const getTasksRunsEditMessageCreateUrl = (projectId: string, taskId: stri
 }
 
 /**
- * Replace a user message in a finished run's conversation and answer the new text. The server starts a successor run whose conversation ends before the edited message, so the message and everything after it drop out of the logs of the successor and of every run that continues it. The new message keeps the original's attached context and permission mode. The successor starts in a new sandbox without the previous snapshot. A refused edit creates no run.
+ * Replace a user message in a run's conversation and answer the new text. A live run must be between turns, and the server ends it first. The server starts a successor run whose conversation ends before the edited message, so the message and everything after it drop out of the logs of the successor and of every run that continues it. The new message keeps the original's attached context and permission mode. The successor starts in a new sandbox without the previous snapshot. A refused edit creates no run.
  * @summary Edit a sent message
  */
 export const tasksRunsEditMessageCreate = async (
