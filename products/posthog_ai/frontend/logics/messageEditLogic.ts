@@ -1,6 +1,5 @@
 import { actions, connect, kea, key, listeners, MakeLogicType, path, props, reducers, selectors } from 'kea'
 
-import { readableErrorMessage } from 'lib/api-error'
 import { FEATURE_FLAGS } from 'lib/constants'
 import { featureFlagLogic, type FeatureFlagsSet } from 'lib/logic/featureFlagLogic'
 
@@ -62,6 +61,9 @@ export interface messageEditLogicActions {
     setDraft: (draft: string) => {
         draft: string
     }
+    openEditor: (item: ThreadItem) => {
+        item: ThreadItem
+    }
     startEdit: (item: ThreadItem) => {
         item: ThreadItem
     }
@@ -96,10 +98,18 @@ export type messageEditLogicType = MakeLogicType<
 
 const SAVE_FAILED_MESSAGE = "Couldn't save your edit. Try again."
 
+/** The server's reason when it refused the edit, or a generic retry message for a network or unknown failure. */
+export function editSaveErrorMessage(error: unknown): string {
+    const detail = error !== null && typeof error === 'object' ? (error as { detail?: unknown }).detail : undefined
+    return typeof detail === 'string' && detail ? detail : SAVE_FAILED_MESSAGE
+}
+
 export const EDIT_BLOCKED_REASONS = {
     slack: "Messages in chats started from Slack can't be edited",
     command: "Commands can't be edited",
     beforeClear: "Messages before /clear can't be edited",
+    otherOpen: 'Finish the edit you have open first',
+    composerPaused: 'Save or cancel your edit first',
     waitingAnswer: 'Answer the waiting question or approval first',
     queued: 'Wait for your queued messages to send',
     replying: 'Wait for the reply to finish',
@@ -137,6 +147,27 @@ export function runEditBlockedReason(state: RunEditState): string | null {
  * Why each of the user's messages can never be edited, by item id. A resume keeps only the turns after the last
  * `/clear`, so earlier messages are out of reach. A compaction keeps the turns, so it blocks nothing.
  */
+/**
+ * Why one message's edit button is disabled, or undefined when it can be pressed. A reason that never clears
+ * comes first, then an editor already open on another message, then the run-wide reason.
+ */
+export function editButtonDisabledReason(
+    itemId: string,
+    {
+        messageReasons,
+        runReason,
+        editingMessageId,
+    }: { messageReasons: Record<string, string>; runReason: string | null; editingMessageId: string | null }
+): string | undefined {
+    if (messageReasons[itemId]) {
+        return messageReasons[itemId]
+    }
+    if (editingMessageId !== null && editingMessageId !== itemId) {
+        return EDIT_BLOCKED_REASONS.otherOpen
+    }
+    return runReason ?? undefined
+}
+
 export function messageEditBlockedReasons(threadItems: ThreadItem[]): Record<string, string> {
     const lastClear = threadItems.findLastIndex((item) => item.type === 'conversation_cleared')
     const reasons: Record<string, string> = {}
@@ -175,6 +206,8 @@ export const messageEditLogic = kea<messageEditLogicType>([
     })),
     actions({
         startEdit: (item: ThreadItem) => ({ item }),
+        /** Internal: opens the editor once `startEdit` has checked that no other editor is open. */
+        openEditor: (item: ThreadItem) => ({ item }),
         setDraft: (draft: string) => ({ draft }),
         cancelEdit: true,
         saveEdit: (item: ThreadItem) => ({ item }),
@@ -192,7 +225,7 @@ export const messageEditLogic = kea<messageEditLogicType>([
         editingMessageId: [
             null as string | null,
             {
-                startEdit: (_, { item }) => item.id,
+                openEditor: (_, { item }) => item.id,
                 cancelEdit: () => null,
                 saveEditSuccess: () => null,
             },
@@ -200,7 +233,7 @@ export const messageEditLogic = kea<messageEditLogicType>([
         draft: [
             '',
             {
-                startEdit: (_, { item }) => item.text ?? '',
+                openEditor: (_, { item }) => item.text ?? '',
                 setDraft: (_, { draft }) => draft,
                 cancelEdit: () => '',
                 saveEditSuccess: () => '',
@@ -217,7 +250,7 @@ export const messageEditLogic = kea<messageEditLogicType>([
         saveError: [
             null as string | null,
             {
-                startEdit: () => null,
+                openEditor: () => null,
                 cancelEdit: () => null,
                 saveEdit: () => null,
                 saveEditFailure: (_, { error }) => error,
@@ -259,6 +292,12 @@ export const messageEditLogic = kea<messageEditLogicType>([
         ],
     }),
     listeners(({ actions, values, props }) => ({
+        // One editor at a time: a second one would replace the open draft and lose its text.
+        startEdit: ({ item }) => {
+            if (values.editingMessageId === null) {
+                actions.openEditor(item)
+            }
+        },
         saveEdit: async ({ item }) => {
             const taskId = values.bootstrappedTaskId
             const runId = values.bootstrappedRunId
@@ -278,7 +317,7 @@ export const messageEditLogic = kea<messageEditLogicType>([
                 runStreamLogic({ streamKey: props.streamKey }).actions.attachEditedRun(taskId, run, text)
                 props.onRunStarted?.(run.id, { run, streamKey: props.streamKey, draft: '' })
             } catch (error) {
-                actions.saveEditFailure(readableErrorMessage(error) ?? SAVE_FAILED_MESSAGE)
+                actions.saveEditFailure(editSaveErrorMessage(error))
             }
         },
     })),

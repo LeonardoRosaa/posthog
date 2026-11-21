@@ -11,6 +11,8 @@ import type { TaskRunDetailDTOApi } from 'products/tasks/frontend/generated/api.
 import type { ThreadItem } from '../types/streamTypes'
 import {
     EDIT_BLOCKED_REASONS,
+    editButtonDisabledReason,
+    editSaveErrorMessage,
     messageEditBlockedReasons,
     messageEditLogic,
     runEditBlockedReason,
@@ -102,6 +104,51 @@ describe('messageEditLogic', () => {
             'clear-cmd': EDIT_BLOCKED_REASONS.command,
             'compact-cmd': EDIT_BLOCKED_REASONS.command,
         })
+    })
+
+    it.each<[string, string, string | null, string | null, string | undefined]>([
+        ['a message that can never be edited', 'command', 'human-1', null, EDIT_BLOCKED_REASONS.command],
+        ['another message while an editor is open', 'human-3', 'human-2', null, EDIT_BLOCKED_REASONS.otherOpen],
+        [
+            'the open message when a turn starts',
+            'human-3',
+            'human-3',
+            EDIT_BLOCKED_REASONS.replying,
+            EDIT_BLOCKED_REASONS.replying,
+        ],
+        ['a message with nothing in the way', 'human-3', null, null, undefined],
+    ])('gives the edit button reason for %s', (_name, itemId, editingMessageId, runReason, expected) => {
+        expect(
+            editButtonDisabledReason(itemId, {
+                messageReasons: { command: EDIT_BLOCKED_REASONS.command },
+                runReason,
+                editingMessageId,
+            })
+        ).toBe(expected)
+    })
+
+    it.each<[string, unknown, string]>([
+        [
+            'a refusal from the server',
+            { detail: 'This chat changed after it loaded.' },
+            'This chat changed after it loaded.',
+        ],
+        ['a network failure', new TypeError('Failed to fetch'), "Couldn't save your edit. Try again."],
+        ['an error with no detail', {}, "Couldn't save your edit. Try again."],
+    ])('shows an actionable message for %s', (_name, error, expected) => {
+        expect(editSaveErrorMessage(error)).toBe(expected)
+    })
+
+    it('keeps one editor open at a time, and cancelling closes it', () => {
+        const other: ThreadItem = { ...ITEM, id: 'human-2', text: 'show churn' }
+        logic.actions.startEdit(ITEM)
+        logic.actions.setDraft('show weekly signups')
+
+        logic.actions.startEdit(other)
+        expect(logic.values).toMatchObject({ editingMessageId: 'human-1', draft: 'show weekly signups' })
+
+        logic.actions.cancelEdit()
+        expect(logic.values).toMatchObject({ editingMessageId: null, draft: '' })
     })
 
     it('re-enables editing once the queued messages are sent', () => {

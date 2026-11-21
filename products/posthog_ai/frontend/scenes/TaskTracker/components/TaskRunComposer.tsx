@@ -19,6 +19,7 @@ import {
     useThreadSkin,
 } from 'products/posthog_ai/frontend/api/logics'
 import { QueuedMessageList } from 'products/posthog_ai/frontend/api/primitives'
+import { EDIT_BLOCKED_REASONS, messageEditLogic } from 'products/posthog_ai/frontend/logics/messageEditLogic'
 import { modelCatalogueLogic } from 'products/posthog_ai/frontend/logics/modelCatalogueLogic'
 import { runSlashCommandsLogic } from 'products/posthog_ai/frontend/logics/runSlashCommandsLogic'
 import { taskRunDefaultsLogic } from 'products/posthog_ai/frontend/logics/taskRunDefaultsLogic'
@@ -92,6 +93,9 @@ export function TaskRunComposer({
         replySuggestions,
     } = useValues(runInteractionLogic(logicProps))
     const { slashCommands, commandResult } = useValues(runSlashCommandsLogic(logicProps))
+    // An open message editor pauses this box: a send would start a turn the edit then has to end.
+    const { editingMessageId } = useValues(messageEditLogic({ streamKey: logicProps.streamKey ?? logicProps.runId }))
+    const editorOpen = editingMessageId !== null
     const { submitComposer, dismissCommandResult } = useActions(runSlashCommandsLogic(logicProps))
     const { catalogue } = useValues(modelCatalogueLogic)
     const isPiTask = isPiTaskRuntime(logicProps.taskRuntime)
@@ -217,7 +221,9 @@ export function TaskRunComposer({
                         <ReplySuggestionHint suggestion={shownReplySuggestion} acceptHint={<Kbd>Tab to accept</Kbd>} />
                     </Composer.Placeholder>
                 ) : (
-                    <Composer.Placeholder>{placeholder}</Composer.Placeholder>
+                    <Composer.Placeholder>
+                        {editorOpen ? EDIT_BLOCKED_REASONS.composerPaused : placeholder}
+                    </Composer.Placeholder>
                 )}
                 <Composer.Textarea
                     data-attr="sandbox-composer-input"
@@ -273,6 +279,8 @@ export function TaskRunComposer({
                     })
                 }
                 loading={isSubmitting}
+                disabled={editorOpen}
+                disabledReason={editorOpen ? EDIT_BLOCKED_REASONS.composerPaused : undefined}
                 stopLoading={!!cancellationState}
                 isTurnActive={isBusy}
                 onStop={requestCancellation}
