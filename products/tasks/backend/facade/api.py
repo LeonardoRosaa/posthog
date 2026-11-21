@@ -434,6 +434,7 @@ __all__ = [
     "get_task_run_log_urls",
     "get_task_run_log_size",
     "read_task_run_log_content",
+    "read_task_run_conversation_log",
     "read_task_run_conversation_logs",
     "thread_view_of_log_content",
     "read_task_run_conversation_log_slice",
@@ -5659,12 +5660,40 @@ def thread_view_of_log_content(log_content: str) -> str:
     return "\n".join(lines)
 
 
-def read_task_run_conversation_logs(run_id: str | UUID, task_id: str | UUID, team_id: int) -> str | None:
+def _log_runs(run_ids: list[str], counts: list[int]) -> tuple[contracts.TaskRunLogRunDTO, ...]:
+    """Where each run's own log starts in the joined log, from the entry count of each run log in chain order."""
+    runs: list[contracts.TaskRunLogRunDTO] = []
+    start = 0
+    for run_id, count in zip(run_ids, counts):
+        runs.append(contracts.TaskRunLogRunDTO(run_id=run_id, start=start))
+        start += count
+    return tuple(runs)
+
+
+def read_task_run_conversation_log(
+    run_id: str | UUID, task_id: str | UUID, team_id: int
+) -> contracts.TaskRunConversationLogDTO | None:
+    """The full conversation log of a run, with where each run of its chain starts in it."""
     run = _get_visible_run(run_id, task_id, team_id)
     if run is None:
         return None
     chain = run.get_history_chain()
-    if len(chain) < 2 or run.task.runtime != Task.Runtime.PI:
+    if run.task.runtime == Task.Runtime.PI:
+        return contracts.TaskRunConversationLogDTO(content=_read_pi_conversation_log(chain))
+    chunks = _read_log_chunks([ancestor.log_url for ancestor in chain])
+    return contracts.TaskRunConversationLogDTO(
+        content=_join_log_chunks(chunks),
+        runs=_log_runs([str(ancestor.id) for ancestor in chain], [len(log_entries(chunk)) for chunk in chunks]),
+    )
+
+
+def read_task_run_conversation_logs(run_id: str | UUID, task_id: str | UUID, team_id: int) -> str | None:
+    log = read_task_run_conversation_log(run_id, task_id, team_id)
+    return log.content if log is not None else None
+
+
+def _read_pi_conversation_log(chain: list[TaskRun]) -> str:
+    if len(chain) < 2:
         return read_task_run_log_content([ancestor.log_url for ancestor in chain])
 
     contents = _TASK_LOG_READ_EXECUTOR.map(lambda ancestor: read_task_run_log_content([ancestor.log_url]), chain)
@@ -5775,6 +5804,7 @@ def read_task_run_conversation_log_slice(
         preamble=sliced.preamble,
         turns_before=sliced.turns_before,
         origin=str(chain[0].id),
+        runs=_log_runs([str(ancestor.id) for ancestor in chain], [part.summary.count for part in parts]),
     )
 
 
@@ -5801,16 +5831,21 @@ def get_task_run_log_size(log_urls: list[str], *, strict: bool = False) -> int:
 
 def read_task_run_log_content(log_urls: list[str]) -> str:
     """Concatenated JSONL content for the given log URLs. Storage-only: safe off the request thread."""
+    return _join_log_chunks(_read_log_chunks(log_urls))
+
+
+def _read_log_chunks(log_urls: list[str]) -> list[str]:
+    """The content of each log URL, in order, with a missing log read as empty."""
     from posthog.storage import object_storage  # noqa: PLC0415 — keep storage deps off the api import path
 
-    chunks: Iterable[str]
     if len(log_urls) == 1:
-        chunks = [object_storage.read(log_urls[0], missing_ok=True) or ""]
-    else:
-        chunks = _TASK_LOG_READ_EXECUTOR.map(
-            lambda log_url: object_storage.read(log_url, missing_ok=True) or "", log_urls
-        )
+        return [object_storage.read(log_urls[0], missing_ok=True) or ""]
+    return list(
+        _TASK_LOG_READ_EXECUTOR.map(lambda log_url: object_storage.read(log_url, missing_ok=True) or "", log_urls)
+    )
 
+
+def _join_log_chunks(chunks: Iterable[str]) -> str:
     parts: list[str] = []
     for chunk in chunks:
         if chunk:

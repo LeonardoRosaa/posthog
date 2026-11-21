@@ -12366,6 +12366,10 @@ class TestTaskRunAPI(BaseTaskAPITest):
         response = self.client.get(f"/api/projects/@current/tasks/{task.id}/runs/{target.id}/logs/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.content.decode("utf-8").splitlines(), expected_lines)
+        ancestor_count = len(expected_lines) - len(own_log.splitlines())
+        expected_runs = [f"{ancestor.id}:0"] if ancestor else []
+        self.assertEqual(response["X-Log-Runs"].split(","), [*expected_runs, f"{target.id}:{ancestor_count}"])
+        self.assertIn("X-Log-Runs", response["Access-Control-Expose-Headers"])
 
     @parameterized.expand(
         [
@@ -12438,7 +12442,9 @@ class TestTaskRunAPI(BaseTaskAPITest):
                 (response["X-Log-Offset"], response["X-Log-Count"], response["X-Log-Preamble"]), expected_headers
             )
             self.assertEqual(response["X-Log-Origin"], str(ancestor.id))
+            self.assertEqual(response["X-Log-Runs"], f"{ancestor.id}:0,{target.id}:2")
             self.assertIn("X-Log-Origin", response["Access-Control-Expose-Headers"])
+            self.assertIn("X-Log-Runs", response["Access-Control-Expose-Headers"])
             lines = [json.loads(line) for line in response.content.decode("utf-8").splitlines()]
             turns = [
                 line["notification"]["params"]["update"]["content"]["text"]
@@ -12496,6 +12502,7 @@ class TestTaskRunAPI(BaseTaskAPITest):
         response = self.client.get(f"/api/projects/@current/tasks/{task.id}/runs/{target.id}/logs/")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("X-Log-Runs", response)
         lines = [json.loads(line) for line in response.content.decode("utf-8").splitlines()]
         runs = {"earlier": str(sibling.id), "target": str(target.id)}
         if len(expected_runs) == 1:

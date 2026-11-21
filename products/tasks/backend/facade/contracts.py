@@ -812,15 +812,35 @@ class TaskRunCreateResult:
 
 
 @dataclass(frozen=True)
+class TaskRunLogRunDTO:
+    """One run of a resume chain and the index in the chain's joined log where that run's own log starts.
+
+    An entry at chain index ``i`` belongs to the last run whose ``start`` is at most ``i``, at index
+    ``i - start`` in that run's log. That run-local index never changes, because a run log is append-only.
+    """
+
+    run_id: str
+    start: int
+
+
+@dataclass(frozen=True)
+class TaskRunConversationLogDTO:
+    """A run's full conversation log. ``runs`` is empty for a log whose indexes change as the chain grows (Pi)."""
+
+    content: str
+    runs: tuple[TaskRunLogRunDTO, ...] = ()
+
+
+@dataclass(frozen=True)
 class TaskRunLogSliceDTO:
     """Part of a run's conversation log.
 
     ``content`` is JSONL. ``offset`` is the index in the full log of the first entry after the
     ``preamble`` entries, ``count`` is the number of entries in the full log, and ``turns_before`` is the
     number of user turns that start before ``offset``. ``origin`` is the id of the first run in the chain: the
-    chain keeps a limited number of runs, so indexes hold only while the origin stays the same. ``sliced`` is
-    false when the run's log cannot be read in parts, so ``content`` is the full log and the other fields carry
-    no index.
+    chain keeps a limited number of runs, so indexes hold only while the origin stays the same. ``runs`` says
+    where each run's own log starts in the full log. ``sliced`` is false when the run's log cannot be read in
+    parts, so ``content`` is the full log and the other fields carry no index.
     """
 
     content: str
@@ -830,6 +850,7 @@ class TaskRunLogSliceDTO:
     turns_before: int = 0
     origin: str = ""
     sliced: bool = True
+    runs: tuple[TaskRunLogRunDTO, ...] = ()
 
 
 @dataclass(frozen=True)

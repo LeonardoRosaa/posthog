@@ -3564,7 +3564,10 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
             "it reads the log, so events after the snapshot reach the live stream. Pass tail_bytes to read only "
             "the latest turns first, add before to page back through older turns, or add start to read every "
             "entry after the ones a client holds. X-Log-Origin names the first run of the chain: indexes from responses "
-            "with different origins do not match. A Pi run returns its full log without the X-Log headers. Pass "
+            "with different origins do not match. X-Log-Runs lists each run of the chain, oldest first, as "
+            "`<run_id>:<start>`, where start is the index in the joined log of that run's first entry, so an entry's "
+            "index within its own run's log is its index minus that start. Full reads carry it too. A Pi run returns "
+            "its full log without the X-Log headers. Pass "
             "view=thread to drop the duplicate tool response copy that a rendered conversation does not use."
         ),
     )
@@ -3584,9 +3587,12 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         with timer("mark_watched"):
             tasks_facade.mark_task_run_stream_watched(pk, task_id, self.team_id)
         log_slice = None
+        log_runs: tuple[tasks_contracts.TaskRunLogRunDTO, ...] = ()
         with timer("s3_read"):
             if "tail_bytes" not in query:
-                log_content = tasks_facade.read_task_run_conversation_logs(pk, task_id, self.team_id)
+                full_log = tasks_facade.read_task_run_conversation_log(pk, task_id, self.team_id)
+                log_content = full_log.content if full_log else None
+                log_runs = full_log.runs if full_log else ()
             else:
                 log_slice = tasks_facade.read_task_run_conversation_log_slice(
                     pk,
@@ -3597,23 +3603,28 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                     start=query.get("start"),
                 )
                 log_content = log_slice.content if log_slice else None
+                log_runs = log_slice.runs if log_slice else ()
         if log_content is None:
             raise NotFound()
         if query["view"] == TaskRunLogsView.THREAD:
             with timer("thread_view"):
                 log_content = tasks_facade.thread_view_of_log_content(log_content)
         response = HttpResponse(log_content, content_type="application/jsonl")
+        exposed_headers: list[str] = []
+        if log_runs:
+            response["X-Log-Runs"] = ",".join(f"{run.run_id}:{run.start}" for run in log_runs)
+            exposed_headers.append("X-Log-Runs")
         if log_slice is not None and log_slice.sliced:
             response["X-Log-Offset"] = str(log_slice.offset)
             response["X-Log-Count"] = str(log_slice.count)
             response["X-Log-Preamble"] = str(log_slice.preamble)
             response["X-Log-Turns-Before"] = str(log_slice.turns_before)
             response["X-Log-Origin"] = log_slice.origin
+            exposed_headers += ["X-Log-Offset", "X-Log-Count", "X-Log-Preamble", "X-Log-Turns-Before", "X-Log-Origin"]
+        if exposed_headers:
             # A cross-origin frontend (standalone OAuth mode) can read only exposed headers, and a page whose
             # headers it cannot read looks like the whole log.
-            response["Access-Control-Expose-Headers"] = (
-                "X-Log-Offset, X-Log-Count, X-Log-Preamble, X-Log-Turns-Before, X-Log-Origin"
-            )
+            response["Access-Control-Expose-Headers"] = ", ".join(exposed_headers)
 
         response["Cache-Control"] = "no-cache"
         response["Server-Timing"] = timer.to_header_string()
