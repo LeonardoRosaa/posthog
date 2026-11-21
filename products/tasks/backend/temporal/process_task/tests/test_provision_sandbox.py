@@ -317,6 +317,7 @@ def test_build_environment_variables_injects_ai_gateway_pair(_api, _jwt, _git):
         ({"same_run_resume": True}, "run-456", None),
         ({"same_run_resume": True, "same_run_resume_idle": True}, "run-456", "1"),
         ({"resume_from_run_id": "run-000", "same_run_resume_idle": True}, "run-000", None),
+        ({"resume_from_run_id": "run-000", "edit_cut": {"run_id": "run-000", "index": 3}}, "run-456", None),
     ],
 )
 def test_build_environment_variables_marks_only_an_idle_same_run_resume_as_idle(

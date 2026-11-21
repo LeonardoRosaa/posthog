@@ -111,6 +111,8 @@ import type {
     TaskRunLivingArtifactOpenResponseApi,
     TaskRunLivingArtifactResponseApi,
     TaskRunLivingArtifactsResponseApi,
+    TaskRunMessageEditRequestApi,
+    TaskRunMessageEditResponseApi,
     TaskRunPostHogReferencesRequestApi,
     TaskRunPostHogReferencesResponseApi,
     TaskRunRelayMessageRequestApi,
@@ -2009,6 +2011,29 @@ export const tasksRunsConnectionTokenRetrieve = async (
     return apiMutator<ConnectionTokenResponseApi>(getTasksRunsConnectionTokenRetrieveUrl(projectId, taskId, id), {
         ...options,
         method: 'GET',
+    })
+}
+
+export const getTasksRunsEditMessageCreateUrl = (projectId: string, taskId: string, id: string) => {
+    return `/api/projects/${projectId}/tasks/${taskId}/runs/${id}/edit_message/`
+}
+
+/**
+ * Replace a user message in a finished run's conversation and answer the new text. The server starts a successor run whose conversation ends before the edited message, so the message and everything after it drop out of the logs of the successor and of every run that continues it. The new message keeps the original's attached context and permission mode. The successor starts in a new sandbox without the previous snapshot. A refused edit creates no run.
+ * @summary Edit a sent message
+ */
+export const tasksRunsEditMessageCreate = async (
+    projectId: string,
+    taskId: string,
+    id: string,
+    taskRunMessageEditRequestApi: TaskRunMessageEditRequestApi,
+    options?: RequestInit
+): Promise<TaskRunMessageEditResponseApi> => {
+    return apiMutator<TaskRunMessageEditResponseApi>(getTasksRunsEditMessageCreateUrl(projectId, taskId, id), {
+        ...options,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...options?.headers },
+        body: JSON.stringify(taskRunMessageEditRequestApi),
     })
 }
 

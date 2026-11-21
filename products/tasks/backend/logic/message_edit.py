@@ -1,0 +1,157 @@
+"""Editing a message the user sent: where a successor run cuts its history, and what it sends again.
+
+A run log is append-only, so an edit never rewrites one. The run that an edit creates stores the address of
+the edited message as its cut. A history read keeps the log of the run at that address only before the
+address, and drops the runs between that run and the cut.
+"""
+
+import json
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
+
+from posthog.dataclasses import frozen
+
+from products.posthog_ai.backend.turn_suggestions.transcript import human_text, is_turn_text
+from products.tasks.backend.constants import EDIT_CUT_STATE_KEY
+
+if TYPE_CHECKING:
+    from products.tasks.backend.models import TaskRun
+
+
+@frozen
+class LogCut:
+    """The address of an edited message: its run, and its index in that run's own log."""
+
+    run_id: str
+    index: int
+
+    def to_state(self) -> dict[str, Any]:
+        return {"run_id": self.run_id, "index": self.index}
+
+
+@frozen
+class HistorySegment:
+    """One run of a history read. ``end`` is the number of its log entries the read keeps, or ``None`` for all."""
+
+    run: "TaskRun"
+    end: int | None = None
+
+
+@frozen
+class EditedMessage:
+    """The user message at an address: its visible text, the context blocks sent before that text, and the
+    permission mode the run was in when the user sent it."""
+
+    text: str
+    context: str
+    mode: str | None
+
+
+def log_cut_from_state(state: Mapping[str, Any] | None) -> LogCut | None:
+    cut = (state or {}).get(EDIT_CUT_STATE_KEY)
+    if not isinstance(cut, Mapping):
+        return None
+    run_id, index = cut.get("run_id"), cut.get("index")
+    if not isinstance(run_id, str) or not run_id or isinstance(index, bool) or not isinstance(index, int):
+        return None
+    if index < 0:
+        return None
+    return LogCut(run_id=run_id, index=index)
+
+
+def history_segments(chain: Sequence["TaskRun"]) -> list[HistorySegment]:
+    """The runs of a history chain, oldest first, with each edit cut applied.
+
+    A run with a cut drops every run before it back to the run at the cut, and that run keeps only the entries
+    before the cut. A cut whose run is not in the chain drops every run before it.
+    """
+    segments: list[HistorySegment] = []
+    cut: LogCut | None = None
+    for run in reversed(chain):
+        end: int | None = None
+        if cut is not None:
+            if str(run.id) != cut.run_id:
+                continue
+            end = cut.index
+        segments.append(HistorySegment(run=run, end=end))
+        cut = log_cut_from_state(run.state)
+    segments.reverse()
+    return segments
+
+
+def _notification(line: str) -> dict[str, Any]:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return {}
+    notification = entry.get("notification") if isinstance(entry, dict) else None
+    return notification if isinstance(notification, dict) else {}
+
+
+def _params(notification: Mapping[str, Any]) -> dict[str, Any]:
+    params = notification.get("params")
+    return params if isinstance(params, dict) else {}
+
+
+def _session_update(notification: Mapping[str, Any]) -> dict[str, Any]:
+    update = _params(notification).get("update")
+    return update if isinstance(update, dict) else {}
+
+
+def _is_hidden(block: object) -> bool:
+    meta = block.get("_meta") if isinstance(block, dict) else None
+    ui = meta.get("ui") if isinstance(meta, dict) else None
+    return isinstance(ui, dict) and ui.get("hidden") is True
+
+
+def _sent_text(notification: Mapping[str, Any]) -> str:
+    """The text of a user message as it was sent, with its context blocks."""
+    if notification.get("method") == "session/update":
+        update = _session_update(notification)
+        content = update.get("content")
+        text = content.get("text") if isinstance(content, dict) else update.get("text")
+        return text if isinstance(text, str) else ""
+    content = _params(notification).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str) and not _is_hidden(block)
+        )
+    return ""
+
+
+def _mode_update(notification: Mapping[str, Any]) -> str | None:
+    if notification.get("method") != "session/update":
+        return None
+    update = _session_update(notification)
+    if update.get("sessionUpdate") != "current_mode_update":
+        return None
+    mode = update.get("currentModeId") or update.get("mode")
+    return mode if isinstance(mode, str) and mode else None
+
+
+def edited_message_at(entries: Sequence[str], index: int) -> EditedMessage | None:
+    """The user message that opens a turn at ``index`` of one run's log entries, or ``None`` when the entry
+    there is anything else."""
+    if index < 0 or index >= len(entries) or "user_message" not in entries[index]:
+        return None
+    notification = _notification(entries[index])
+    method = notification.get("method")
+    human = human_text(method if isinstance(method, str) else None, _params(notification))
+    if human is None or not is_turn_text(human.text):
+        return None
+    sent = _sent_text(notification).rstrip()
+    context = sent[: len(sent) - len(human.text)].rstrip() if sent.endswith(human.text) else ""
+    mode: str | None = None
+    for line in entries[:index]:
+        if "current_mode_update" in line and (update := _mode_update(_notification(line))) is not None:
+            mode = update
+    return EditedMessage(text=human.text, context=context, mode=mode)
+
+
+def edited_message_content(message: EditedMessage, text: str) -> str:
+    """The new message to send in place of ``message``, with the context blocks the original carried."""
+    return f"{message.context}\n\n{text}" if message.context else text

@@ -48,6 +48,7 @@ GITLAB_TASKS_FEATURE_FLAG = "tasks-gitlab"
 REASONING_EFFORTS = model_catalog.REASONING_EFFORTS
 PI_ACP_FEATURE_FLAG = "pi-acp"
 TASK_ANALYSIS_FEATURE_FLAG = "posthog-code-task-analysis"
+EDIT_MESSAGES_FEATURE_FLAG = "phai-edit-messages"
 
 ANALYSIS_TARGET_TASK_ID_STATE_KEY = "analysis_target_task_id"
 ANALYSIS_TARGET_RUN_ID_STATE_KEY = "analysis_target_run_id"
@@ -72,6 +73,8 @@ SAME_RUN_RESUME_STATE_KEY = "same_run_resume"
 SAME_RUN_RESUME_IDLE_STATE_KEY = "same_run_resume_idle"
 _LEGACY_SAME_RUN_RESUME_STATE_KEY = "handoff_resumed"
 _LEGACY_SAME_RUN_RESUME_IDLE_STATE_KEY = "handoff_resume_idle"
+# A run created by editing a sent message holds that message's log address here. Its history stops there.
+EDIT_CUT_STATE_KEY = "edit_cut"
 SERVER_OWNED_RESUME_STATE_KEYS = frozenset(
     {
         SAME_RUN_RESUME_STATE_KEY,

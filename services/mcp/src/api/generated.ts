@@ -118877,6 +118877,39 @@ export namespace Schemas {
       artifacts: TaskRunLivingArtifactResponse[];
     }
 
+    /**
+     * Where a user message sits in a run's conversation.
+     */
+    export interface TaskRunMessageAddress {
+      /** ID of the run whose own log holds the message. */
+      run_id: string;
+      /**
+         * Index of the message in that run's own log. The run logs endpoint's X-Log-Runs header gives where each run's log starts, so this is the message's index in the joined log minus that start.
+         * @minimum 0
+         */
+      index: number;
+    }
+
+    /**
+     * Request body for editing a user message in a finished run's conversation.
+     */
+    export interface TaskRunMessageEditRequest {
+      /** The log address of the message to edit. */
+      address: TaskRunMessageAddress;
+      /** The message text as the client shows it, without context blocks. The edit is refused with 409 when the message at the address has other text. */
+      original_text: string;
+      /** The new message text. It replaces the message and everything after it. */
+      text: string;
+    }
+
+    /**
+     * Response for a saved edit: the run that answers the edited message.
+     */
+    export interface TaskRunMessageEditResponse {
+      /** The successor run. Its conversation ends before the edited message, and it answers the new text. */
+      run: TaskRunDetailDTO;
+    }
+
     export interface TaskRunPostHogReference {
       /**
          * Fallback display name for the referenced object.

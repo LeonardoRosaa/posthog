@@ -5692,3 +5692,38 @@ class DesktopUsageSerializer(serializers.Serializer):
     is_pro = serializers.BooleanField()
     code_usage_subscribed = serializers.BooleanField()
     billing_period_end = serializers.CharField(allow_null=True)
+
+
+class TaskRunMessageAddressSerializer(serializers.Serializer):
+    """Where a user message sits in a run's conversation."""
+
+    run_id = serializers.UUIDField(help_text="ID of the run whose own log holds the message.")
+    index = serializers.IntegerField(
+        min_value=0,
+        help_text=(
+            "Index of the message in that run's own log. The run logs endpoint's X-Log-Runs header gives where "
+            "each run's log starts, so this is the message's index in the joined log minus that start."
+        ),
+    )
+
+
+class TaskRunMessageEditRequestSerializer(serializers.Serializer):
+    """Request body for editing a user message in a finished run's conversation."""
+
+    address = TaskRunMessageAddressSerializer(help_text="The log address of the message to edit.")
+    original_text = serializers.CharField(
+        trim_whitespace=False,
+        help_text=(
+            "The message text as the client shows it, without context blocks. The edit is refused with 409 when "
+            "the message at the address has other text."
+        ),
+    )
+    text = serializers.CharField(help_text="The new message text. It replaces the message and everything after it.")
+
+
+class TaskRunMessageEditResponseSerializer(serializers.Serializer):
+    """Response for a saved edit: the run that answers the edited message."""
+
+    run = TaskRunDetailSerializer(
+        help_text="The successor run. Its conversation ends before the edited message, and it answers the new text."
+    )

@@ -627,6 +627,24 @@ class TaskRunResult:
     run_id: UUID | None = None
 
 
+class TaskRunMessageEditRefusal(StrEnum):
+    """Why an edit of a sent message created no run."""
+
+    NOT_TASK_CREATOR = "not_task_creator"
+    RUN_ACTIVE = "run_active"
+    CONVERSATION_CHANGED = "conversation_changed"
+    UNSUPPORTED_RUNTIME = "unsupported_runtime"
+
+
+@dataclass(frozen=True)
+class TaskRunMessageEditResult:
+    """Outcome of editing a sent message. Exactly one of ``refusal`` / ``run`` is set: ``run`` is the outcome of
+    starting the successor run, which can still carry a ``TaskRunResult.error``."""
+
+    refusal: TaskRunMessageEditRefusal | None = None
+    run: TaskRunResult | None = None
+
+
 @dataclass(frozen=True)
 class StagedArtifactPreparedDTO:
     """One prepared staged upload, mirroring ``TaskStagedArtifactPrepareUploadResponseSerializer``."""

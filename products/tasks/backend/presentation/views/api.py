@@ -208,6 +208,8 @@ from products.tasks.backend.presentation.serializers import (
     TaskRunLivingArtifactsResponseSerializer,
     TaskRunLogsQuerySerializer,
     TaskRunLogsView,
+    TaskRunMessageEditRequestSerializer,
+    TaskRunMessageEditResponseSerializer,
     TaskRunPostHogReferencesRequestSerializer,
     TaskRunPostHogReferencesResponseSerializer,
     TaskRunRelayMessageRequestSerializer,
@@ -3579,6 +3581,118 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
     @action(detail=True, methods=["get"], url_path="log_entries", required_scopes=["task:read"])
     def log_entries(self, request, pk=None, **kwargs):
         return self._logs_response(request, pk)
+
+    _MESSAGE_EDIT_REFUSALS: dict[tasks_contracts.TaskRunMessageEditRefusal, tuple[int, str]] = {
+        tasks_contracts.TaskRunMessageEditRefusal.NOT_TASK_CREATOR: (
+            status.HTTP_403_FORBIDDEN,
+            "Only the person who started this chat can edit its messages.",
+        ),
+        tasks_contracts.TaskRunMessageEditRefusal.RUN_ACTIVE: (
+            status.HTTP_409_CONFLICT,
+            "Wait for the reply to finish, then edit the message.",
+        ),
+        tasks_contracts.TaskRunMessageEditRefusal.CONVERSATION_CHANGED: (
+            status.HTTP_409_CONFLICT,
+            "This chat changed after it loaded. Reload it and try again.",
+        ),
+        tasks_contracts.TaskRunMessageEditRefusal.UNSUPPORTED_RUNTIME: (
+            status.HTTP_409_CONFLICT,
+            "Messages in this chat can't be edited.",
+        ),
+    }
+
+    @validated_request(
+        request_serializer=TaskRunMessageEditRequestSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=TaskRunMessageEditResponseSerializer, description="The successor run was started"
+            ),
+            400: OpenApiResponse(response=TaskRunErrorResponseSerializer, description="The successor run is invalid"),
+            403: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description=(
+                    "Editing is not enabled for the user (code `edit_messages_disabled`), the user did not create "
+                    "the task (code `not_task_creator`), or PostHog Desktop access is required"
+                ),
+            ),
+            404: OpenApiResponse(description="Task or run not found"),
+            409: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description=(
+                    "The run is not finished (code `run_active`), the address does not point at a user message "
+                    "with the original text in this run's conversation, or a newer run continued it (code "
+                    "`conversation_changed`), or the task's runtime keeps no message addresses (code "
+                    "`unsupported_runtime`)"
+                ),
+            ),
+            429: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer, description="Team is over its posthog_code usage limit"
+            ),
+        },
+        summary="Edit a sent message",
+        description=(
+            "Replace a user message in a finished run's conversation and answer the new text. The server starts a "
+            "successor run whose conversation ends before the edited message, so the message and everything after "
+            "it drop out of the logs of the successor and of every run that continues it. The new message keeps "
+            "the original's attached context and permission mode. The successor starts in a new sandbox without "
+            "the previous snapshot. A refused edit creates no run."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="edit_message", required_scopes=["task:write"])
+    def edit_message(self, request, pk=None, **kwargs):
+        task_id = self._ensure_task_accessible()
+        if is_sandbox_origin_request(request):
+            return _sandbox_run_disabled_response()
+        user = cast(User, request.user)
+        if not (
+            tasks_facade.edit_messages_enabled(self.team, user)
+            and tasks_access.get_posthog_ai_access_decision(user, self.organization).allowed
+        ):
+            return Response(
+                TaskRunErrorResponseSerializer(
+                    {"detail": "Editing messages isn't available to you.", "code": "edit_messages_disabled"}
+                ).data,
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not tasks_facade.task_exempt_from_code_access(task_id, self.team_id) and (
+            access_response := code_access_required_response(request, self.organization, task_id=task_id)
+        ):
+            return access_response
+        if not run_context.may_read_task_run_context(request=request, team_id=self.team_id, task_id=task_id, run_id=pk):
+            raise PermissionDenied("The analytics data in this task run is not available to you.")
+        if limit_response := usage_limit_response(request.user, self.team_id):
+            return limit_response
+
+        address = request.validated_data["address"]
+        result = tasks_facade.edit_task_run_message(
+            task_id,
+            pk,
+            self.team_id,
+            user.id,
+            message_run_id=str(address["run_id"]),
+            index=address["index"],
+            original_text=request.validated_data["original_text"],
+            text=request.validated_data["text"],
+        )
+        if result is None:
+            raise NotFound()
+        if result.refusal is not None:
+            status_code, detail = self._MESSAGE_EDIT_REFUSALS[result.refusal]
+            return Response(
+                TaskRunErrorResponseSerializer({"detail": detail, "code": result.refusal.value}).data,
+                status=status_code,
+            )
+        assert result.run is not None
+        if result.run.error is not None:
+            return TaskViewSet._task_error_response(result.run.error)
+        run = (
+            tasks_facade.get_task_run_detail(result.run.run_id, task_id, self.team_id, user_id=user.id)
+            if result.run.run_id is not None
+            else None
+        )
+        if run is None:
+            raise NotFound()
+        return Response(TaskRunMessageEditResponseSerializer({"run": run}).data)
 
     def _logs_response(self, request, pk) -> HttpResponse:
         task_id = self._ensure_task_accessible()

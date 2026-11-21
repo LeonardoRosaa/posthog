@@ -38,6 +38,7 @@ from products.tasks.backend.exceptions import (
     TaskInvalidStateError,
     TaskNotFoundError,
 )
+from products.tasks.backend.logic.message_edit import log_cut_from_state
 from products.tasks.backend.logic.services.agentsh import (
     _get_debug_only_domains,
     _get_debug_only_ports,
@@ -619,7 +620,11 @@ def _build_environment_variables(
     environment_variables.update(get_git_identity_env_vars(task, ctx.state))
 
     run_state = parse_run_state(ctx.state)
-    if run_state.resume_from_run_id:
+    if run_state.resume_from_run_id and log_cut_from_state(ctx.state) is not None:
+        # The agent rebuilds its history from the logs of the run it resumes. Only this run's logs apply the
+        # edit cut, so the predecessor's logs would bring the removed turns back.
+        environment_variables["POSTHOG_RESUME_RUN_ID"] = str(ctx.run_id)
+    elif run_state.resume_from_run_id:
         environment_variables["POSTHOG_RESUME_RUN_ID"] = run_state.resume_from_run_id
     elif run_state.same_run_resume:
         environment_variables["POSTHOG_RESUME_RUN_ID"] = str(ctx.run_id)

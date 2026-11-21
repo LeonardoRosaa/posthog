@@ -77,6 +77,7 @@ from products.posthog_ai.backend.task_ownership import (
 )
 from products.tasks.backend.constants import (
     AGENT_OTEL_TELEMETRY_STATE_KEY,
+    ALL_INITIAL_PERMISSION_MODE_CHOICES,
     ANALYSIS_TARGET_IMAGE_ID_STATE_KEY,
     ANALYSIS_TARGET_IMAGE_NAME_STATE_KEY,
     ANALYSIS_TARGET_REPOSITORY_STATE_KEY,
@@ -87,6 +88,7 @@ from products.tasks.backend.constants import (
     CODEX_OWN_SUBSCRIPTION_CLOUD_FEATURE_FLAG as CODEX_OWN_SUBSCRIPTION_CLOUD_FEATURE_FLAG,
     DEV_STACK_PREVIEW_PORT,
     DEV_STACK_PREVIEW_STATE_KEY,
+    EDIT_CUT_STATE_KEY,
     FINAL_MESSAGE_MAX_CHARS,
     GITHUB_PR_URL_PREFIX as GITHUB_PR_URL_PREFIX,  # re-exported for signals billing
     MAX_CUSTOM_IMAGES_PER_TEAM,
@@ -121,6 +123,7 @@ from products.tasks.backend.facade.profiles import (
     resolve_task_origin,
 )
 from products.tasks.backend.feature_flags import (
+    edit_messages_enabled,
     get_model_access_error,
     gitlab_tasks_enabled,
     own_subscription_cloud_enabled as own_subscription_cloud_enabled,
@@ -135,11 +138,20 @@ from products.tasks.backend.logic.log_slice import (
     LogPart,
     LogPartSummary,
     log_entries,
+    log_part,
     slice_log_parts_from,
     slice_log_parts_tail,
     summarize_log_part,
     summary_from_json,
     summary_to_json,
+)
+from products.tasks.backend.logic.message_edit import (
+    HistorySegment,
+    LogCut,
+    edited_message_at,
+    edited_message_content,
+    history_segments,
+    log_cut_from_state,
 )
 from products.tasks.backend.logic.model_access import InvalidModelAccess, resolve_model_access
 from products.tasks.backend.logic.services.gateway_model_pin import GATEWAY_PRODUCT_STATE_KEY, pinned_run_allows_model
@@ -419,6 +431,7 @@ __all__ = [
     "list_tasks",
     "list_workflow_last_runs",
     "pi_cloud_runtime_enabled",
+    "edit_messages_enabled",
     "gitlab_repository_error",
     "gitlab_tasks_enabled",
     "prepare_task_run_artifact_uploads",
@@ -435,6 +448,7 @@ __all__ = [
     "get_task_run_log_size",
     "read_task_run_log_content",
     "read_task_run_conversation_log",
+    "edit_task_run_message",
     "read_task_run_conversation_logs",
     "thread_view_of_log_content",
     "read_task_run_conversation_log_slice",
@@ -3239,6 +3253,8 @@ _PROTECTED_RUN_STATE_KEYS = frozenset(
         "snapshot_kind",
         "snapshot_mount_path",
         *SERVER_OWNED_RESUME_STATE_KEYS,
+        # Decides which part of the earlier history the run and its agent see.
+        EDIT_CUT_STATE_KEY,
         "workflow_id",
         "pending_dispatch",
         "cancel_requested_at",
@@ -5680,10 +5696,15 @@ def read_task_run_conversation_log(
     chain = run.get_history_chain()
     if run.task.runtime == Task.Runtime.PI:
         return contracts.TaskRunConversationLogDTO(content=_read_pi_conversation_log(chain))
-    chunks = _read_log_chunks([ancestor.log_url for ancestor in chain])
+    segments = history_segments(chain)
+    chunks = _read_log_chunks([segment.run.log_url for segment in segments])
+    entries = [log_entries(chunk)[: segment.end] for segment, chunk in zip(segments, chunks)]
     return contracts.TaskRunConversationLogDTO(
-        content=_join_log_chunks(chunks),
-        runs=_log_runs([str(ancestor.id) for ancestor in chain], [len(log_entries(chunk)) for chunk in chunks]),
+        content=_join_log_chunks(
+            chunk if segment.end is None else "".join(f"{line}\n" for line in kept)
+            for segment, chunk, kept in zip(segments, chunks, entries)
+        ),
+        runs=_log_runs([str(segment.run.id) for segment in segments], [len(kept) for kept in entries]),
     )
 
 
@@ -5791,8 +5812,11 @@ def read_task_run_conversation_log_slice(
         if content is None:
             return None
         return contracts.TaskRunLogSliceDTO(content=content, offset=0, count=0, sliced=False)
-    chain = run.get_history_chain()
-    parts = _conversation_log_parts([ancestor.log_url for ancestor in chain])
+    segments = history_segments(run.get_history_chain())
+    parts = _conversation_log_parts([segment.run.log_url for segment in segments])
+    parts = [
+        part if segment.end is None else _cut_log_part(part, segment.end) for segment, part in zip(segments, parts)
+    ]
     if start is not None:
         sliced = slice_log_parts_from(parts, start, tail_bytes)
     else:
@@ -5803,9 +5827,23 @@ def read_task_run_conversation_log_slice(
         count=sliced.count,
         preamble=sliced.preamble,
         turns_before=sliced.turns_before,
-        origin=str(chain[0].id),
-        runs=_log_runs([str(ancestor.id) for ancestor in chain], [part.summary.count for part in parts]),
+        origin=_history_origin(segments),
+        runs=_log_runs([str(segment.run.id) for segment in segments], [part.summary.count for part in parts]),
     )
+
+
+def _cut_log_part(part: LogPart, end: int) -> LogPart:
+    """The part with only its entries before ``end``. Its summary describes the full log, so it is built again."""
+    return log_part(part.entries()[:end])
+
+
+def _history_origin(segments: list[HistorySegment]) -> str:
+    """The run that names the history's indexes. An edit cut changes every index after it, so the newest run
+    with a cut names them, else the oldest run."""
+    for segment in reversed(segments):
+        if log_cut_from_state(segment.run.state) is not None:
+            return str(segment.run.id)
+    return str(segments[0].run.id)
 
 
 def get_task_run_log_urls(run_id: str | UUID, task_id: str | UUID, team_id: int) -> list[str] | None:
@@ -10091,11 +10129,14 @@ def run_task(
     pipeline_rerun: bool = False,
     free_trial_enabled: bool | None = None,
     only_if_no_runs: bool = False,
+    edit_cut: LogCut | None = None,
 ) -> contracts.TaskRunResult | None:
     """Return None for an inaccessible task, otherwise return its refreshed detail or a structured error.
 
     The caller applies the usage gate. Only server-requested Signals research may set pipeline_rerun.
     With only_if_no_runs, the task lock prevents another first run, after any report admission lock.
+    With edit_cut, the run resumes cold from the history before that address, so it never reuses a warm run
+    or a snapshot, which hold the turns after it.
     """
     from products.signals.backend.facade.report_tasks import (  # noqa: PLC0415 — cross-product read kept off the api import path
         enforce_report_implementation_rerun_cap,
@@ -10276,6 +10317,7 @@ def run_task(
     warm_run = (
         None
         if pipeline_rerun
+        or edit_cut is not None
         or scheduled_at is not None
         or run_source == RunSource.AGENT
         or validated_data.get("client_platform") == "mobile"
@@ -10442,7 +10484,10 @@ def run_task(
             extra_state[PRIOR_RUN_TAGS_STATE_KEY] = previous_run.task_tags
         if not is_pi_task:
             extra_state["resume_from_run_id"] = str(resume_from_run_id)
-            extra_state.update(prev_state.resume_snapshot_carry_state())
+            if edit_cut is not None:
+                extra_state[EDIT_CUT_STATE_KEY] = edit_cut.to_state()
+            else:
+                extra_state.update(prev_state.resume_snapshot_carry_state())
             if previous_is_import_run:
                 extra_state["resume_from_import_run"] = True
 
@@ -10769,6 +10814,76 @@ def run_task(
         logger.exception("Failed to hydrate task %s after starting run %s", task.id, task_run.id)
         task_detail = _task_detail_to_dto(task, latest_run=task_run, include_latest_run_log_url=False)
     return contracts.TaskRunResult(task=task_detail, run_error=run_error, run_id=task_run.id)
+
+
+def _is_idle_warm_run(run: TaskRun) -> bool:
+    state = run.state or {}
+    return state.get("prewarmed") is True and state.get("await_user_message") is True
+
+
+def edit_task_run_message(
+    task_id: str | UUID,
+    run_id: str | UUID,
+    team_id: int,
+    user_id: int,
+    *,
+    message_run_id: str,
+    index: int,
+    original_text: str,
+    text: str,
+) -> contracts.TaskRunMessageEditResult | None:
+    """Start a successor of a finished run that answers ``text`` in place of the user message at an address.
+
+    The address is the message's run and its index in that run's own log. The successor's history ends before
+    the message, and its pending message is ``text`` with the original's context blocks and permission mode.
+    Every check runs before the successor is created, so a refused edit writes nothing. ``None`` when the task
+    or run is not visible.
+    """
+    from posthog.storage import object_storage  # noqa: PLC0415 — keep storage deps off the api import path
+
+    Refusal = contracts.TaskRunMessageEditRefusal
+    task = _visible_task_qs(team_id, user_id, for_control=True).filter(id=task_id).first()
+    if task is None:
+        return None
+    run = task.runs.filter(id=run_id, team_id=team_id).first()
+    if run is None:
+        return None
+    if task.created_by_id != user_id:
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.NOT_TASK_CREATOR)
+    if task.runtime == Task.Runtime.PI:
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.UNSUPPORTED_RUNTIME)
+    if not run.is_terminal:
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_ACTIVE)
+    # A warm successor idling for the next message holds no turns, so it does not change the conversation.
+    newer_runs = task.runs.filter(team_id=team_id, created_at__gt=run.created_at).only("id", "state")
+    if not all(_is_idle_warm_run(newer_run) for newer_run in newer_runs):
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    segment = next(
+        (segment for segment in history_segments(run.get_history_chain()) if str(segment.run.id) == message_run_id),
+        None,
+    )
+    if segment is None or (segment.end is not None and index >= segment.end):
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    message = edited_message_at(log_entries(object_storage.read(segment.run.log_url, missing_ok=True) or ""), index)
+    if message is None or message.text != original_text.strip():
+        return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+
+    validated_data: dict[str, Any] = {
+        "resume_from_run_id": run.id,
+        "pending_user_message": edited_message_content(message, text.strip()),
+        "mode": "interactive",
+    }
+    mode = message.mode or (segment.run.state or {}).get("initial_permission_mode")
+    if mode in ALL_INITIAL_PERMISSION_MODE_CHOICES:
+        validated_data["initial_permission_mode"] = mode
+    result = run_task(
+        task.id,
+        team_id,
+        user_id,
+        validated_data=validated_data,
+        edit_cut=LogCut(run_id=message_run_id, index=index),
+    )
+    return contracts.TaskRunMessageEditResult(run=result) if result is not None else None
 
 
 # --- Task presence beacons ---

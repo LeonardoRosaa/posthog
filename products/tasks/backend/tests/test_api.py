@@ -12453,6 +12453,155 @@ class TestTaskRunAPI(BaseTaskAPITest):
             ]
             self.assertEqual(turns, expected_turns)
 
+    @staticmethod
+    def _chat_line(kind: str, text: str) -> str:
+        if kind == "user":
+            return json.dumps({"notification": {"method": "_posthog/user_message", "params": {"content": text}}})
+        update = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}
+        return json.dumps({"notification": {"method": "session/update", "params": {"update": update}}})
+
+    @parameterized.expand([("full_read", ""), ("tail_read", "?tail_bytes=1000000")])
+    @patch("posthog.storage.object_storage.read")
+    def test_logs_endpoint_stops_at_an_edit_cut(self, _name: str, query: str, mock_read):
+        task = self.create_task()
+        first = TaskRun.objects.create(task=task, team=self.team)
+        second = TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(first.id)})
+        third = TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(second.id)})
+        edited = TaskRun.objects.create(
+            task=task,
+            team=self.team,
+            state={"resume_from_run_id": str(third.id), "edit_cut": {"run_id": str(second.id), "index": 2}},
+        )
+        follow_up = TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(edited.id)})
+        line = self._chat_line
+        logs = {
+            first.log_url: [line("user", "one"), line("agent", "reply one")],
+            second.log_url: [line("user", "two"), line("agent", "reply two"), line("user", "three")],
+            third.log_url: [line("agent", "reply three"), line("user", "four")],
+            edited.log_url: [line("user", "three again"), line("agent", "new reply")],
+            follow_up.log_url: [line("user", "five")],
+        }
+        mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
+
+        response = self.client.get(f"/api/projects/@current/tasks/{task.id}/runs/{follow_up.id}/logs/{query}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        texts = [
+            line["notification"]["params"].get("content") or line["notification"]["params"]["update"]["content"]["text"]
+            for line in (json.loads(raw) for raw in response.content.decode("utf-8").splitlines())
+        ]
+        self.assertEqual(texts, ["one", "reply one", "two", "reply two", "three again", "new reply", "five"])
+        self.assertEqual(response["X-Log-Runs"], f"{first.id}:0,{second.id}:2,{edited.id}:4,{follow_up.id}:6")
+        if query:
+            self.assertEqual(response["X-Log-Origin"], str(edited.id))
+
+    def _edit_message_fixture(self) -> tuple[Task, TaskRun, TaskRun, dict[str, list[str]]]:
+        task = self.create_task()
+        first = TaskRun.objects.create(
+            task=task, team=self.team, status=TaskRun.Status.COMPLETED, state={"initial_permission_mode": "default"}
+        )
+        latest = TaskRun.objects.create(
+            task=task,
+            team=self.team,
+            status=TaskRun.Status.COMPLETED,
+            state={"resume_from_run_id": str(first.id), "snapshot_external_id": "snap-latest"},
+        )
+        mode = json.dumps(
+            {
+                "notification": {
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "current_mode_update", "currentModeId": "plan"}},
+                }
+            }
+        )
+        context = "<posthog_untrusted_context>\ninsight abc\n</posthog_untrusted_context>"
+        logs = {
+            first.log_url: [
+                mode,
+                self._chat_line("user", f"{context}\n\nshow signups"),
+                self._chat_line("agent", "here are signups"),
+            ],
+            latest.log_url: [self._chat_line("user", "and churn?"), self._chat_line("agent", "here is churn")],
+        }
+        return task, first, latest, logs
+
+    def _post_edit(self, task: Task, run: TaskRun, address_run: TaskRun, index: int, original_text: str):
+        return self.client.post(
+            f"/api/projects/@current/tasks/{task.id}/runs/{run.id}/edit_message/",
+            {
+                "address": {"run_id": str(address_run.id), "index": index},
+                "original_text": original_text,
+                "text": "show weekly signups",
+            },
+            format="json",
+        )
+
+    def _enable_edit_flag(self, enabled: bool) -> None:
+        previous = self.mock_feature_flag.side_effect
+        self.mock_feature_flag.side_effect = lambda flag_name, *args, **kwargs: (
+            enabled if flag_name == "phai-edit-messages" else previous(flag_name, *args, **kwargs)
+        )
+
+    @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
+    @patch("posthog.storage.object_storage.read")
+    def test_edit_message_starts_a_cold_successor_with_the_cut(self, mock_read, mock_workflow):
+        self._enable_edit_flag(True)
+        task, first, latest, logs = self._edit_message_fixture()
+        mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
+
+        response = self._post_edit(task, latest, first, 1, "show signups")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+        successor = TaskRun.objects.get(id=response.json()["run"]["id"])
+        self.assertEqual(successor.state["resume_from_run_id"], str(latest.id))
+        self.assertEqual(successor.state["edit_cut"], {"run_id": str(first.id), "index": 1})
+        self.assertEqual(
+            successor.state["pending_user_message"],
+            "<posthog_untrusted_context>\ninsight abc\n</posthog_untrusted_context>\n\nshow weekly signups",
+        )
+        self.assertEqual(successor.state["initial_permission_mode"], "plan")
+        self.assertNotIn("snapshot_external_id", successor.state)
+        mock_workflow.assert_called_once()
+
+    @parameterized.expand(
+        [
+            ("flag_off", "flag_off", status.HTTP_403_FORBIDDEN, "edit_messages_disabled"),
+            ("not_the_task_creator", "no_creator", status.HTTP_403_FORBIDDEN, "not_task_creator"),
+            ("text_does_not_match", "other_text", status.HTTP_409_CONFLICT, "conversation_changed"),
+            ("address_is_an_agent_message", "agent_index", status.HTTP_409_CONFLICT, "conversation_changed"),
+            ("run_is_live", "live_run", status.HTTP_409_CONFLICT, "run_active"),
+            ("a_newer_run_continued_it", "newer_run", status.HTTP_409_CONFLICT, "conversation_changed"),
+        ]
+    )
+    @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
+    @patch("posthog.storage.object_storage.read")
+    def test_edit_message_refusals_create_no_run(
+        self, _name: str, case: str, expected_status: int, expected_code: str, mock_read, mock_workflow
+    ):
+        self._enable_edit_flag(case != "flag_off")
+        task, first, latest, logs = self._edit_message_fixture()
+        mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
+        if case == "no_creator":
+            Task.objects.filter(id=task.id).update(created_by=None)
+        if case == "live_run":
+            TaskRun.objects.filter(id=latest.id).update(status=TaskRun.Status.IN_PROGRESS)
+        if case == "newer_run":
+            TaskRun.objects.create(task=task, team=self.team, state={"resume_from_run_id": str(latest.id)})
+        run_count = task.runs.count()
+
+        response = self._post_edit(
+            task,
+            latest,
+            first,
+            2 if case == "agent_index" else 1,
+            "show other things" if case == "other_text" else "show signups",
+        )
+
+        self.assertEqual(response.status_code, expected_status, response.json())
+        self.assertEqual(response.json()["code"], expected_code)
+        self.assertEqual(task.runs.count(), run_count)
+        mock_workflow.assert_not_called()
+
     @parameterized.expand(
         [
             ("live_gated_run_is_marked", TaskRun.Status.IN_PROGRESS, True, True),
