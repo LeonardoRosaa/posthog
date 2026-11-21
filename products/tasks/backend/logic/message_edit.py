@@ -176,6 +176,46 @@ def cleared_after(segment_entries: Sequence[Sequence[str]], index: int) -> bool:
     return False
 
 
+_MESSAGE_BREAKS = frozenset({"tool_call", "agent_thought_chunk"})
+_MARKER_METHODS = frozenset({"_posthog/compact_boundary", "_posthog/conversation_cleared"})
+
+
+def removed_message_count(segment_entries: Sequence[Sequence[str]], index: int) -> int:
+    """How many user and assistant messages an edit at ``index`` of the first segment removes.
+
+    ``segment_entries`` holds the entries a history read keeps, for the message's run and each run after it. Only
+    the bubbles a person sees count: a user message once, however many echoes repeat it, and an assistant message
+    once per stretch of text between tool calls, thinking and markers. The edited message itself is replaced, not
+    removed, so it does not count.
+    """
+    count = 0
+    # The entries right after the edited message are its own echoes, so they start as part of a user message.
+    previous = "user"
+    for position, entries in enumerate(segment_entries):
+        for line in entries[index + 1 :] if position == 0 else entries:
+            notification = _notification(line)
+            method = notification.get("method")
+            if _is_user_entry(notification):
+                human = human_text(method if isinstance(method, str) else None, _params(notification))
+                if previous != "user" and human is not None and is_turn_text(human.text):
+                    count += 1
+                previous = "user"
+                continue
+            if method in _MARKER_METHODS:
+                previous = "marker"
+                continue
+            if method != "session/update":
+                continue
+            kind = _session_update(notification).get("sessionUpdate")
+            if kind in ("agent_message_chunk", "agent_message"):
+                if previous != "agent":
+                    count += 1
+                previous = "agent"
+            elif kind in _MESSAGE_BREAKS:
+                previous = "tool"
+    return count
+
+
 def turn_is_complete(entries: Sequence[str]) -> bool:
     """Whether the agent finished the last turn in one run's log entries: a turn completion came after the
     last user message. A log with no completion yet, such as a run still booting, has no finished turn."""

@@ -208,6 +208,8 @@ from products.tasks.backend.presentation.serializers import (
     TaskRunLivingArtifactsResponseSerializer,
     TaskRunLogsQuerySerializer,
     TaskRunLogsView,
+    TaskRunMessageEditPreviewRequestSerializer,
+    TaskRunMessageEditPreviewResponseSerializer,
     TaskRunMessageEditRequestSerializer,
     TaskRunMessageEditResponseSerializer,
     TaskRunPostHogReferencesRequestSerializer,
@@ -3617,6 +3619,87 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         ),
     }
 
+    def _message_edit_gate(self, request, task_id: str, pk) -> Response | None:
+        """The checks a save and its preview share: the flag, PostHog AI access, code access and the run's data."""
+        if is_sandbox_origin_request(request):
+            return _sandbox_run_disabled_response()
+        user = cast(User, request.user)
+        if not (
+            tasks_facade.edit_messages_enabled(self.team, user)
+            and tasks_access.get_posthog_ai_access_decision(user, self.organization).allowed
+        ):
+            return Response(
+                TaskRunErrorResponseSerializer(
+                    {"detail": "Editing messages isn't available to you.", "code": "edit_messages_disabled"}
+                ).data,
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not tasks_facade.task_exempt_from_code_access(task_id, self.team_id) and (
+            access_response := code_access_required_response(request, self.organization, task_id=task_id)
+        ):
+            return access_response
+        if not run_context.may_read_task_run_context(request=request, team_id=self.team_id, task_id=task_id, run_id=pk):
+            raise PermissionDenied("The analytics data in this task run is not available to you.")
+        return None
+
+    @validated_request(
+        request_serializer=TaskRunMessageEditPreviewRequestSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=TaskRunMessageEditPreviewResponseSerializer,
+                description="How many messages saving the edit would remove",
+            ),
+            403: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description=(
+                    "Editing is not enabled for the user (code `edit_messages_disabled`), the user did not create "
+                    "the task (code `not_task_creator`), or PostHog Desktop access is required"
+                ),
+            ),
+            404: OpenApiResponse(description="Task or run not found"),
+            409: OpenApiResponse(
+                response=TaskRunErrorResponseSerializer,
+                description=(
+                    "The address does not point at a user message with the original text in this run's "
+                    "conversation (code `conversation_changed`), or the task's runtime keeps no message addresses "
+                    "(code `unsupported_runtime`)"
+                ),
+            ),
+        },
+        summary="Preview an edit of a sent message",
+        description=(
+            "Count the messages that saving an edit at an address would remove: the user and assistant messages "
+            "after the edited one across the run's whole history, without tool calls or markers. Runs the same "
+            "ownership, flag and address checks as saving, and changes nothing."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="edit_message_preview", required_scopes=["task:read"])
+    def edit_message_preview(self, request, pk=None, **kwargs):
+        task_id = self._ensure_task_accessible()
+        if gate_response := self._message_edit_gate(request, task_id, pk):
+            return gate_response
+        address = request.validated_data["address"]
+        preview = tasks_facade.preview_task_run_message_edit(
+            task_id,
+            pk,
+            self.team_id,
+            cast(User, request.user).id,
+            message_run_id=str(address["run_id"]),
+            index=address["index"],
+            original_text=request.validated_data["original_text"],
+        )
+        if preview is None:
+            raise NotFound()
+        if preview.refusal is not None:
+            status_code, detail = self._MESSAGE_EDIT_REFUSALS[preview.refusal]
+            return Response(
+                TaskRunErrorResponseSerializer({"detail": detail, "code": preview.refusal.value}).data,
+                status=status_code,
+            )
+        return Response(
+            TaskRunMessageEditPreviewResponseSerializer({"removed_message_count": preview.removed_message_count}).data
+        )
+
     @validated_request(
         request_serializer=TaskRunMessageEditRequestSerializer,
         responses={
@@ -3664,25 +3747,9 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
     @action(detail=True, methods=["post"], url_path="edit_message", required_scopes=["task:write"])
     def edit_message(self, request, pk=None, **kwargs):
         task_id = self._ensure_task_accessible()
-        if is_sandbox_origin_request(request):
-            return _sandbox_run_disabled_response()
+        if gate_response := self._message_edit_gate(request, task_id, pk):
+            return gate_response
         user = cast(User, request.user)
-        if not (
-            tasks_facade.edit_messages_enabled(self.team, user)
-            and tasks_access.get_posthog_ai_access_decision(user, self.organization).allowed
-        ):
-            return Response(
-                TaskRunErrorResponseSerializer(
-                    {"detail": "Editing messages isn't available to you.", "code": "edit_messages_disabled"}
-                ).data,
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        if not tasks_facade.task_exempt_from_code_access(task_id, self.team_id) and (
-            access_response := code_access_required_response(request, self.organization, task_id=task_id)
-        ):
-            return access_response
-        if not run_context.may_read_task_run_context(request=request, team_id=self.team_id, task_id=task_id, run_id=pk):
-            raise PermissionDenied("The analytics data in this task run is not available to you.")
         if limit_response := usage_limit_response(request.user, self.team_id):
             return limit_response
 

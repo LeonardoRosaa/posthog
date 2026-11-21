@@ -5,7 +5,11 @@ import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 
 import { initKeaTests } from '~/test/init'
 
-import { tasksRunsEditMessageCreate, tasksRunsRetrieve } from 'products/tasks/frontend/generated/api'
+import {
+    tasksRunsEditMessageCreate,
+    tasksRunsEditMessagePreviewCreate,
+    tasksRunsRetrieve,
+} from 'products/tasks/frontend/generated/api'
 import type { TaskRunDetailDTOApi } from 'products/tasks/frontend/generated/api.schemas'
 
 import type { ThreadItem } from '../types/streamTypes'
@@ -15,6 +19,7 @@ import {
     editSaveErrorMessage,
     messageEditBlockedReasons,
     messageEditLogic,
+    removedMessagesNotice,
     runEditBlockedReason,
     type RunEditState,
 } from './messageEditLogic'
@@ -22,6 +27,7 @@ import { runStreamLogic } from './runStreamLogic'
 
 jest.mock('products/tasks/frontend/generated/api', () => ({
     tasksRunsEditMessageCreate: jest.fn(),
+    tasksRunsEditMessagePreviewCreate: jest.fn(),
     tasksRunsRetrieve: jest.fn(),
 }))
 
@@ -41,6 +47,7 @@ describe('messageEditLogic', () => {
         initKeaTests()
         onRunStarted.mockReset()
         jest.mocked(tasksRunsEditMessageCreate).mockReset()
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockReset().mockResolvedValue({ removed_message_count: 0 })
         // The bootstrap never answers, so the stream stays on the run each test points it at.
         jest.mocked(tasksRunsRetrieve)
             .mockReset()
@@ -159,6 +166,54 @@ describe('messageEditLogic', () => {
 
         logic.actions.setEditContext(false, 0)
         expect(logic.values.runEditBlockedReason).toBeNull()
+    })
+
+    it.each<[number | null, string | null]>([
+        [null, null],
+        [0, null],
+        [1, 'Saving removes the message after this one.'],
+        [4, 'Saving removes the 4 messages after this one.'],
+    ])('says what saving removes when the count is %s', (count, expected) => {
+        expect(removedMessagesNotice(count)).toBe(expected)
+    })
+
+    it('loads the removed-message count when the editor opens', async () => {
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockResolvedValue({ removed_message_count: 3 })
+
+        await expectLogic(logic, () => logic.actions.startEdit(ITEM))
+            .toMatchValues({ removedMessageCountLoading: true, removedMessageCount: null })
+            .toDispatchActions(['setRemovedMessageCount'])
+            .toMatchValues({ removedMessageCountLoading: false, removedMessageCount: 3 })
+
+        expect(tasksRunsEditMessagePreviewCreate).toHaveBeenCalledWith(
+            String(stream.values.currentProjectId),
+            'task-1',
+            'run-1',
+            { address: { run_id: 'run-0', index: 3 }, original_text: 'show signups' }
+        )
+    })
+
+    it('shows no count when the preview fails', async () => {
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockRejectedValue({ status: 409 })
+
+        await expectLogic(logic, () => logic.actions.startEdit(ITEM))
+            .toDispatchActions(['setRemovedMessageCount'])
+            .toMatchValues({ removedMessageCountLoading: false, removedMessageCount: null })
+    })
+
+    it('drops a count that arrives after the editor closed', async () => {
+        let answer: (value: { removed_message_count: number }) => void = () => {}
+        const preview = new Promise<{ removed_message_count: number }>((resolve) => (answer = resolve))
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockReturnValue(preview)
+
+        logic.actions.startEdit(ITEM)
+        logic.actions.cancelEdit()
+        answer({ removed_message_count: 3 })
+        await preview
+        // One more turn of the queue lets the listener run its code after the await.
+        await Promise.resolve()
+
+        expect(logic.values).toMatchObject({ removedMessageCount: null, removedMessageCountLoading: false })
     })
 
     it('saves the edit at the message address and moves the thread to the new run', async () => {

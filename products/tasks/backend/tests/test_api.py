@@ -12706,6 +12706,44 @@ class TestTaskRunAPI(BaseTaskAPITest):
 
     @parameterized.expand(
         [
+            ("counts_the_messages_after_the_cut_across_runs", "count", status.HTTP_200_OK, None),
+            ("flag_off", "flag_off", status.HTTP_403_FORBIDDEN, "edit_messages_disabled"),
+            ("not_the_task_creator", "no_creator", status.HTTP_403_FORBIDDEN, "not_task_creator"),
+            ("text_does_not_match", "other_text", status.HTTP_409_CONFLICT, "conversation_changed"),
+        ]
+    )
+    @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
+    @patch("posthog.storage.object_storage.read")
+    def test_edit_message_preview(
+        self, _name: str, case: str, expected_status: int, expected_code: str | None, mock_read, mock_workflow
+    ):
+        self._enable_edit_flag(case != "flag_off")
+        task, first, latest, logs = self._edit_message_fixture()
+        mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
+        if case == "no_creator":
+            Task.objects.filter(id=task.id).update(created_by=None)
+        run_count = task.runs.count()
+
+        response = self.client.post(
+            f"/api/projects/@current/tasks/{task.id}/runs/{latest.id}/edit_message_preview/",
+            {
+                "address": {"run_id": str(first.id), "index": 1},
+                "original_text": "show other things" if case == "other_text" else "show signups",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, expected_status, response.json())
+        if expected_code is None:
+            # The agent's reply in the first run, then the next question and its reply in the latest run.
+            self.assertEqual(response.json(), {"removed_message_count": 3})
+        else:
+            self.assertEqual(response.json()["code"], expected_code)
+        self.assertEqual(task.runs.count(), run_count)
+        mock_workflow.assert_not_called()
+
+    @parameterized.expand(
+        [
             ("live_gated_run_is_marked", TaskRun.Status.IN_PROGRESS, True, True),
             ("finished_gated_run_is_not_marked", TaskRun.Status.COMPLETED, True, False),
             ("live_ungated_run_is_not_marked", TaskRun.Status.IN_PROGRESS, False, False),

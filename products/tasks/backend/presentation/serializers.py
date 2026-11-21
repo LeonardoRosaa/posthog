@@ -5721,6 +5721,31 @@ class TaskRunMessageEditRequestSerializer(serializers.Serializer):
     text = serializers.CharField(help_text="The new message text. It replaces the message and everything after it.")
 
 
+class TaskRunMessageEditPreviewRequestSerializer(serializers.Serializer):
+    """Request body for previewing an edit of a user message, before any text is changed."""
+
+    address = TaskRunMessageAddressSerializer(help_text="The log address of the message to edit.")
+    original_text = serializers.CharField(
+        trim_whitespace=False,
+        help_text=(
+            "The message text as the client shows it, without context blocks. The preview is refused with 409 "
+            "when the message at the address has other text."
+        ),
+    )
+
+
+class TaskRunMessageEditPreviewResponseSerializer(serializers.Serializer):
+    """What saving an edit at an address would remove."""
+
+    removed_message_count = serializers.IntegerField(
+        min_value=0,
+        help_text=(
+            "User and assistant messages after the edited one, across the whole run history, that saving the edit "
+            "removes. Tool calls and markers are not counted."
+        ),
+    )
+
+
 class TaskRunMessageEditResponseSerializer(serializers.Serializer):
     """Response for a saved edit: the run that answers the edited message."""
 

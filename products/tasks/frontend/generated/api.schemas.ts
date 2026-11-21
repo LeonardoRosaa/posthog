@@ -4094,6 +4094,27 @@ export interface TaskRunMessageEditResponseApi {
     run: TaskRunDetailDTOApi
 }
 
+/**
+ * Request body for previewing an edit of a user message, before any text is changed.
+ */
+export interface TaskRunMessageEditPreviewRequestApi {
+    /** The log address of the message to edit. */
+    address: TaskRunMessageAddressApi
+    /** The message text as the client shows it, without context blocks. The preview is refused with 409 when the message at the address has other text. */
+    original_text: string
+}
+
+/**
+ * What saving an edit at an address would remove.
+ */
+export interface TaskRunMessageEditPreviewResponseApi {
+    /**
+     * User and assistant messages after the edited one, across the whole run history, that saving the edit removes. Tool calls and markers are not counted.
+     * @minimum 0
+     */
+    removed_message_count: number
+}
+
 export interface TaskRunRelayMessageRequestApi {
     /**
      * Joined message body. Used when text_parts is absent.

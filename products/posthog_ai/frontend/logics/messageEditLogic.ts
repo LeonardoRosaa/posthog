@@ -3,7 +3,7 @@ import { actions, connect, kea, key, listeners, MakeLogicType, path, props, redu
 import { FEATURE_FLAGS } from 'lib/constants'
 import { featureFlagLogic, type FeatureFlagsSet } from 'lib/logic/featureFlagLogic'
 
-import { tasksRunsEditMessageCreate } from 'products/tasks/frontend/generated/api'
+import { tasksRunsEditMessageCreate, tasksRunsEditMessagePreviewCreate } from 'products/tasks/frontend/generated/api'
 
 import type { PermissionRequestRecord, ThreadItem } from '../types/streamTypes'
 import { startsWithAgentCommand } from '../utils/slashCommands'
@@ -29,6 +29,8 @@ export interface messageEditLogicValues {
     messageEditBlockedReasons: Record<string, string>
     pendingPermissionRequest: PermissionRequestRecord | null // runStreamLogic
     queuedMessageCount: number
+    removedMessageCount: number | null
+    removedMessageCountLoading: boolean
     runEditBlockedReason: string | null
     saveError: string | null
     saving: boolean
@@ -57,6 +59,9 @@ export interface messageEditLogicActions {
     ) => {
         queuedMessageCount: number
         startedFromSlack: boolean
+    }
+    setRemovedMessageCount: (count: number | null) => {
+        count: number | null
     }
     setDraft: (draft: string) => {
         draft: string
@@ -97,6 +102,21 @@ export type messageEditLogicType = MakeLogicType<
 >
 
 const SAVE_FAILED_MESSAGE = "Couldn't save your edit. Try again."
+
+export const REMOVED_MESSAGES_LOADING = 'Counting the messages after this one'
+
+/**
+ * What the editor says about the messages saving removes. Nothing when none would go, or when the count is unknown
+ * because the preview failed: a wrong count would be worse than none.
+ */
+export function removedMessagesNotice(count: number | null): string | null {
+    if (count === null || count === 0) {
+        return null
+    }
+    return count === 1
+        ? 'Saving removes the message after this one.'
+        : `Saving removes the ${count} messages after this one.`
+}
 
 /** The server's reason when it refused the edit, or a generic retry message for a network or unknown failure. */
 export function editSaveErrorMessage(error: unknown): string {
@@ -218,6 +238,8 @@ export const messageEditLogic = kea<messageEditLogicType>([
             startedFromSlack,
             queuedMessageCount,
         }),
+        /** Internal: the preview's count for the open editor, or null when it could not be loaded. */
+        setRemovedMessageCount: (count: number | null) => ({ count }),
     }),
     reducers({
         startedFromSlack: [false, { setEditContext: (_, { startedFromSlack }) => startedFromSlack }],
@@ -237,6 +259,24 @@ export const messageEditLogic = kea<messageEditLogicType>([
                 setDraft: (_, { draft }) => draft,
                 cancelEdit: () => '',
                 saveEditSuccess: () => '',
+            },
+        ],
+        removedMessageCount: [
+            null as number | null,
+            {
+                openEditor: () => null,
+                setRemovedMessageCount: (_, { count }) => count,
+                cancelEdit: () => null,
+                saveEditSuccess: () => null,
+            },
+        ],
+        removedMessageCountLoading: [
+            false,
+            {
+                openEditor: () => true,
+                setRemovedMessageCount: () => false,
+                cancelEdit: () => false,
+                saveEditSuccess: () => false,
             },
         ],
         saving: [
@@ -296,6 +336,28 @@ export const messageEditLogic = kea<messageEditLogicType>([
         startEdit: ({ item }) => {
             if (values.editingMessageId === null) {
                 actions.openEditor(item)
+            }
+        },
+        // The thread often holds only the tail of a long log, so only the server can count what the edit removes.
+        openEditor: async ({ item }) => {
+            const { bootstrappedTaskId: taskId, bootstrappedRunId: runId, currentProjectId: projectId } = values
+            if (!item.logAddress || !taskId || !runId || projectId === null) {
+                actions.setRemovedMessageCount(null)
+                return
+            }
+            let count: number | null = null
+            try {
+                const preview = await tasksRunsEditMessagePreviewCreate(String(projectId), taskId, runId, {
+                    address: { run_id: item.logAddress.runId, index: item.logAddress.index },
+                    original_text: item.text ?? '',
+                })
+                count = preview.removed_message_count
+            } catch {
+                count = null
+            }
+            // A slow answer for an editor that has since closed, or moved to another message, is dropped.
+            if (values.editingMessageId === item.id) {
+                actions.setRemovedMessageCount(count)
             }
         },
         saveEdit: async ({ item }) => {

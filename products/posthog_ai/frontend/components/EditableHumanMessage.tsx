@@ -1,7 +1,13 @@
 import { useActions, useValues } from 'kea'
 import { memo, useCallback, useEffect, useRef } from 'react'
 
-import { editButtonDisabledReason, messageEditLogic, type MessageEditLogicProps } from '../logics/messageEditLogic'
+import {
+    editButtonDisabledReason,
+    messageEditLogic,
+    type MessageEditLogicProps,
+    REMOVED_MESSAGES_LOADING,
+    removedMessagesNotice,
+} from '../logics/messageEditLogic'
 import type { ThreadItem } from '../types/streamTypes'
 import { HumanMessageEditor } from './HumanMessageEditor'
 import { LemonHumanMessage } from './LemonHumanMessage'
@@ -20,7 +26,9 @@ function OpenMessageEditor({
     /** A reason that appeared after the editor opened. It holds the save, and the draft stays. */
     blockedReason?: string
 }): JSX.Element {
-    const { draft, saving, saveError } = useValues(messageEditLogic(editing))
+    const { draft, saving, saveError, removedMessageCount, removedMessageCountLoading } = useValues(
+        messageEditLogic(editing)
+    )
     const { setDraft, cancelEdit, saveEdit } = useActions(messageEditLogic(editing))
     const trimmed = draft.trim()
     const Editor = quill ? QuillHumanMessageEditor : HumanMessageEditor
@@ -31,6 +39,8 @@ function OpenMessageEditor({
             onSave={() => saveEdit(item)}
             onCancel={cancelEdit}
             saving={saving}
+            notice={removedMessagesNotice(removedMessageCount)}
+            noticeLoadingText={removedMessageCountLoading ? REMOVED_MESSAGES_LOADING : null}
             error={saveError ?? blockedReason ?? null}
             saveDisabledReason={
                 blockedReason ??

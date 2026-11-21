@@ -11,6 +11,8 @@ export function QuillHumanMessageEditor({
     saving,
     error,
     saveDisabledReason,
+    notice,
+    noticeLoadingText,
 }: HumanMessageEditorProps): JSX.Element {
     return (
         <ChatMessage align="end" data-attr="posthog-ai-human-message-editor">
@@ -27,6 +29,11 @@ export function QuillHumanMessageEditor({
                     aria-label="Edit message"
                     className="w-full"
                 />
+                {noticeLoadingText ? (
+                    <div className="text-muted-foreground text-xs">{noticeLoadingText}</div>
+                ) : (
+                    notice && <div className="text-muted-foreground text-xs">{notice}</div>
+                )}
                 {error && <div className="text-destructive-foreground text-xs">{error}</div>}
                 <div className="flex flex-wrap justify-end gap-1">
                     <Button

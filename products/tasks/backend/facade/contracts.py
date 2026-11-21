@@ -650,6 +650,15 @@ class TaskRunMessageEditResult:
 
 
 @dataclass(frozen=True)
+class TaskRunMessageEditPreview:
+    """What saving an edit would do, without starting a run. Exactly one of ``refusal`` / ``removed_message_count``
+    is set: the count is the user and assistant messages after the edited one that the edit removes."""
+
+    refusal: TaskRunMessageEditRefusal | None = None
+    removed_message_count: int | None = None
+
+
+@dataclass(frozen=True)
 class StagedArtifactPreparedDTO:
     """One prepared staged upload, mirroring ``TaskStagedArtifactPrepareUploadResponseSerializer``."""
 

@@ -13,6 +13,7 @@ from products.tasks.backend.logic.message_edit import (
     edited_message_content,
     history_segments,
     is_agent_command,
+    removed_message_count,
     turn_is_complete,
 )
 from products.tasks.backend.models import TaskRun
@@ -221,3 +222,50 @@ class TestEditRules(SimpleTestCase):
         self, _name: str, segment_entries: list[list[str]], index: int, expected: bool
     ) -> None:
         self.assertEqual(cleared_after(segment_entries, index), expected)
+
+
+def _agent_text(text: str) -> str:
+    return _session_update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
+
+
+def _user_echo(text: str) -> str:
+    return _session_update({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": text}})
+
+
+TOOL_CALL = _session_update({"sessionUpdate": "tool_call", "toolCallId": "t1"})
+
+
+class TestRemovedMessageCount(SimpleTestCase):
+    @parameterized.expand(
+        [
+            ("the_last_message_removes_nothing", [[_user_message("a"), _user_echo("a")]], 0),
+            (
+                "counts_bubbles_across_runs",
+                [
+                    [
+                        _user_message("a"),
+                        _user_echo("a"),
+                        _agent_text("x"),
+                        _agent_text("y"),
+                        TOOL_CALL,
+                        _agent_text("z"),
+                    ],
+                    [_user_message("b"), _user_echo("b"), _agent_text("w")],
+                ],
+                4,
+            ),
+            (
+                "markers_and_resume_prompts_are_not_messages",
+                [
+                    [_user_message("a"), COMPACTED],
+                    [
+                        _user_message("You are resuming a previous conversation. Earlier turns follow."),
+                        _agent_text("w"),
+                    ],
+                ],
+                1,
+            ),
+        ]
+    )
+    def test_counts_what_the_edit_removes(self, _name: str, segment_entries: list[list[str]], expected: int) -> None:
+        self.assertEqual(removed_message_count(segment_entries, 0), expected)

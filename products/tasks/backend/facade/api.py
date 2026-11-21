@@ -146,6 +146,7 @@ from products.tasks.backend.logic.log_slice import (
     summary_to_json,
 )
 from products.tasks.backend.logic.message_edit import (
+    EditedMessage,
     HistorySegment,
     LogCut,
     cleared_after,
@@ -154,6 +155,7 @@ from products.tasks.backend.logic.message_edit import (
     history_segments,
     is_agent_command,
     log_cut_from_state,
+    removed_message_count,
     turn_is_complete,
 )
 from products.tasks.backend.logic.model_access import InvalidModelAccess, resolve_model_access
@@ -452,6 +454,7 @@ __all__ = [
     "read_task_run_log_content",
     "read_task_run_conversation_log",
     "edit_task_run_message",
+    "preview_task_run_message_edit",
     "read_task_run_conversation_logs",
     "thread_view_of_log_content",
     "read_task_run_conversation_log_slice",
@@ -10877,6 +10880,74 @@ def _release_idle_warm_runs(runs: Sequence[TaskRun], task: Task, team_id: int, u
     return True
 
 
+@frozen
+class _EditAddress:
+    """A checked edit address: the user message there and the history a read keeps from its run onwards."""
+
+    chain: list[TaskRun]
+    segment: HistorySegment
+    message: EditedMessage
+    # The entries a history read keeps, for the message's run and each run after it, in order.
+    kept_entries: list[list[str]]
+
+
+def _edit_address(run: TaskRun, *, message_run_id: str, index: int, original_text: str) -> _EditAddress | None:
+    """The user message at an address in ``run``'s conversation, or ``None`` when the address no longer points at
+    a user message with ``original_text``, so the conversation changed after the client loaded it."""
+    from posthog.storage import object_storage  # noqa: PLC0415 — keep storage deps off the api import path
+
+    chain = run.get_history_chain()
+    segments = history_segments(chain)
+    position = next(
+        (position for position, segment in enumerate(segments) if str(segment.run.id) == message_run_id), None
+    )
+    if position is None:
+        return None
+    segment = segments[position]
+    if segment.end is not None and index >= segment.end:
+        return None
+    entries = log_entries(object_storage.read(segment.run.log_url, missing_ok=True) or "")
+    message = edited_message_at(entries, index)
+    if message is None or message.text != original_text.strip():
+        return None
+    later_entries = [
+        log_entries(object_storage.read(later.run.log_url, missing_ok=True) or "")[: later.end]
+        for later in segments[position + 1 :]
+    ]
+    return _EditAddress(
+        chain=chain, segment=segment, message=message, kept_entries=[entries[: segment.end], *later_entries]
+    )
+
+
+def preview_task_run_message_edit(
+    task_id: str | UUID,
+    run_id: str | UUID,
+    team_id: int,
+    user_id: int,
+    *,
+    message_run_id: str,
+    index: int,
+    original_text: str,
+) -> contracts.TaskRunMessageEditPreview | None:
+    """How many messages saving an edit at an address would remove, with the same ownership and address checks as
+    ``edit_task_run_message``. Reads only. ``None`` when the task or run is not visible."""
+    Refusal = contracts.TaskRunMessageEditRefusal
+    task = _visible_task_qs(team_id, user_id, for_control=True).filter(id=task_id).first()
+    if task is None:
+        return None
+    run = task.runs.filter(id=run_id, team_id=team_id).first()
+    if run is None:
+        return None
+    if task.created_by_id != user_id:
+        return contracts.TaskRunMessageEditPreview(refusal=Refusal.NOT_TASK_CREATOR)
+    if task.runtime == Task.Runtime.PI:
+        return contracts.TaskRunMessageEditPreview(refusal=Refusal.UNSUPPORTED_RUNTIME)
+    address = _edit_address(run, message_run_id=message_run_id, index=index, original_text=original_text)
+    if address is None:
+        return contracts.TaskRunMessageEditPreview(refusal=Refusal.CONVERSATION_CHANGED)
+    return contracts.TaskRunMessageEditPreview(removed_message_count=removed_message_count(address.kept_entries, index))
+
+
 def edit_task_run_message(
     task_id: str | UUID,
     run_id: str | UUID,
@@ -10897,7 +10968,6 @@ def edit_task_run_message(
     holds the removed turns in memory. Every check runs before either, so a refused edit writes nothing.
     ``None`` when the task or run is not visible.
     """
-    from posthog.storage import object_storage  # noqa: PLC0415 — keep storage deps off the api import path
 
     Refusal = contracts.TaskRunMessageEditRefusal
     task = _visible_task_qs(team_id, user_id, for_control=True).filter(id=task_id).first()
@@ -10921,31 +10991,17 @@ def edit_task_run_message(
     newer_runs = list(task.runs.filter(team_id=team_id, created_at__gt=run.created_at).only("id", "state"))
     if not all(_is_idle_warm_run(newer_run) for newer_run in newer_runs):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
-    chain = run.get_history_chain()
-    segments = history_segments(chain)
-    position = next(
-        (position for position, segment in enumerate(segments) if str(segment.run.id) == message_run_id), None
-    )
-    segment = segments[position] if position is not None else None
-    if segment is None or (segment.end is not None and index >= segment.end):
+    address = _edit_address(run, message_run_id=message_run_id, index=index, original_text=original_text)
+    if address is None:
         return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
-    assert position is not None
-    entries = log_entries(object_storage.read(segment.run.log_url, missing_ok=True) or "")
-    message = edited_message_at(entries, index)
-    if message is None or message.text != original_text.strip():
-        return contracts.TaskRunMessageEditResult(refusal=Refusal.CONVERSATION_CHANGED)
+    message, segment, chain = address.message, address.segment, address.chain
     if is_agent_command(message.text):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.AGENT_COMMAND)
-    later_entries = [
-        log_entries(object_storage.read(later.run.log_url, missing_ok=True) or "")[: later.end]
-        for later in segments[position + 1 :]
-    ]
-    if cleared_after([entries[: segment.end], *later_entries], index):
+    if cleared_after(address.kept_entries, index):
         return contracts.TaskRunMessageEditResult(refusal=Refusal.BEFORE_CLEAR)
     if live:
         # The run is the chain's last segment, kept whole, since nothing cuts it.
-        run_entries = entries if segment.run.id == run.id else later_entries[-1]
-        if not turn_is_complete(run_entries):
+        if not turn_is_complete(address.kept_entries[-1]):
             return contracts.TaskRunMessageEditResult(refusal=Refusal.RUN_ACTIVE)
 
     validated_data: dict[str, Any] = {

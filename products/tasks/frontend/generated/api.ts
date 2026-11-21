@@ -111,6 +111,8 @@ import type {
     TaskRunLivingArtifactOpenResponseApi,
     TaskRunLivingArtifactResponseApi,
     TaskRunLivingArtifactsResponseApi,
+    TaskRunMessageEditPreviewRequestApi,
+    TaskRunMessageEditPreviewResponseApi,
     TaskRunMessageEditRequestApi,
     TaskRunMessageEditResponseApi,
     TaskRunPostHogReferencesRequestApi,
@@ -2035,6 +2037,32 @@ export const tasksRunsEditMessageCreate = async (
         headers: { 'Content-Type': 'application/json', ...options?.headers },
         body: JSON.stringify(taskRunMessageEditRequestApi),
     })
+}
+
+export const getTasksRunsEditMessagePreviewCreateUrl = (projectId: string, taskId: string, id: string) => {
+    return `/api/projects/${projectId}/tasks/${taskId}/runs/${id}/edit_message_preview/`
+}
+
+/**
+ * Count the messages that saving an edit at an address would remove: the user and assistant messages after the edited one across the run's whole history, without tool calls or markers. Runs the same ownership, flag and address checks as saving, and changes nothing.
+ * @summary Preview an edit of a sent message
+ */
+export const tasksRunsEditMessagePreviewCreate = async (
+    projectId: string,
+    taskId: string,
+    id: string,
+    taskRunMessageEditPreviewRequestApi: TaskRunMessageEditPreviewRequestApi,
+    options?: RequestInit
+): Promise<TaskRunMessageEditPreviewResponseApi> => {
+    return apiMutator<TaskRunMessageEditPreviewResponseApi>(
+        getTasksRunsEditMessagePreviewCreateUrl(projectId, taskId, id),
+        {
+            ...options,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...options?.headers },
+            body: JSON.stringify(taskRunMessageEditPreviewRequestApi),
+        }
+    )
 }
 
 export const getTasksRunsPreviewRetrieveUrl = (projectId: string, taskId: string, id: string) => {

@@ -2848,6 +2848,34 @@ export const TasksRunsEditMessageCreateBody = /* @__PURE__ */ zod
     .describe("Request body for editing a user message in a finished run's conversation.")
 
 /**
+ * Count the messages that saving an edit at an address would remove: the user and assistant messages after the edited one across the run's whole history, without tool calls or markers. Runs the same ownership, flag and address checks as saving, and changes nothing.
+ * @summary Preview an edit of a sent message
+ */
+export const tasksRunsEditMessagePreviewCreateBodyAddressOneIndexMin = 0
+
+export const TasksRunsEditMessagePreviewCreateBody = /* @__PURE__ */ zod
+    .object({
+        address: zod
+            .object({
+                run_id: zod.uuid().describe('ID of the run whose own log holds the message.'),
+                index: zod
+                    .number()
+                    .min(tasksRunsEditMessagePreviewCreateBodyAddressOneIndexMin)
+                    .describe(
+                        "Index of the message in that run's own log. The run logs endpoint's X-Log-Runs header gives where each run's log starts, so this is the message's index in the joined log minus that start."
+                    ),
+            })
+            .describe("Where a user message sits in a run's conversation.")
+            .describe('The log address of the message to edit.'),
+        original_text: zod
+            .string()
+            .describe(
+                'The message text as the client shows it, without context blocks. The preview is refused with 409 when the message at the address has other text.'
+            ),
+    })
+    .describe('Request body for previewing an edit of a user message, before any text is changed.')
+
+/**
  * Queue a Slack relay workflow to post a run message into the mapped Slack thread.
  * @summary Relay run message to Slack
  */
