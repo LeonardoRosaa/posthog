@@ -1,4 +1,5 @@
 import { actions, connect, kea, key, listeners, MakeLogicType, path, props, reducers, selectors } from 'kea'
+import posthog from 'posthog-js'
 
 import { FEATURE_FLAGS } from 'lib/constants'
 import { featureFlagLogic, type FeatureFlagsSet } from 'lib/logic/featureFlagLogic'
@@ -136,6 +137,19 @@ export function removedMessagesNotice(count: number | null): string | null {
 export function editSaveErrorMessage(error: unknown): string {
     const detail = error !== null && typeof error === 'object' ? (error as { detail?: unknown }).detail : undefined
     return typeof detail === 'string' && detail ? detail : SAVE_FAILED_MESSAGE
+}
+
+// pinned: analytics event name, renaming breaks dashboards. The backend captures the started and saved events.
+export const MESSAGE_EDIT_CANCELLED_EVENT = 'posthog_ai_message_edit_cancelled'
+
+/**
+ * The message's place among the user's messages, counted from the end of the thread: 1 is the last one. The
+ * same rule as `position_from_end` on the tasks backend. Null when the message is not in the thread.
+ */
+export function positionFromEnd(threadItems: ThreadItem[], itemId: string): number | null {
+    const humanIds = threadItems.filter((item) => item.type === 'human_message').map((item) => item.id)
+    const position = humanIds.indexOf(itemId)
+    return position === -1 ? null : humanIds.length - position
 }
 
 export const EDIT_BLOCKED_REASONS = {
@@ -357,7 +371,21 @@ export const messageEditLogic = kea<messageEditLogicType>([
             (threadItems: ThreadItem[]): Record<string, string> => messageEditBlockedReasons(threadItems),
         ],
     }),
-    listeners(({ actions, values, props }) => ({
+    listeners(({ actions, values, props, selectors }) => ({
+        // Counts and flags only: the message text and its context never go into the event.
+        cancelEdit: (_, __, ___, previousState) => {
+            const itemId = selectors.editingMessageId(previousState)
+            if (itemId === null) {
+                return
+            }
+            posthog.capture(MESSAGE_EDIT_CANCELLED_EVENT, {
+                task_id: values.bootstrappedTaskId,
+                run_id: values.bootstrappedRunId,
+                removed_message_count: selectors.removedMessageCount(previousState),
+                removed_turns_change_project: selectors.removedTurnsChangeProject(previousState),
+                position_from_end: positionFromEnd(values.threadItems, itemId),
+            })
+        },
         // One editor at a time: a second one would replace the open draft and lose its text.
         startEdit: ({ item }) => {
             if (values.editingMessageId === null) {

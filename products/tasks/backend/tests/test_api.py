@@ -12572,10 +12572,11 @@ class TestTaskRunAPI(BaseTaskAPITest):
         ]
 
     @parameterized.expand([("a_write_tool_call", "completed", True), ("a_failed_call", "failed", False)])
+    @patch("products.tasks.backend.facade.api.posthoganalytics.capture")
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     @patch("posthog.storage.object_storage.read")
     def test_saving_an_edit_reports_project_changes_in_the_removed_turns(
-        self, _name: str, call_status: str, expected: bool, mock_read, _mock_workflow
+        self, _name: str, call_status: str, expected: bool, mock_read, _mock_workflow, mock_capture
     ):
         task, first, latest, logs = self._edit_message_fixture()
         logs[latest.log_url][1:1] = self._posthog_exec_call("call dashboard-create {}", call_status)
@@ -12594,6 +12595,26 @@ class TestTaskRunAPI(BaseTaskAPITest):
 
         assert result is not None and result.run is not None
         self.assertEqual(result.removed_turns_change_project, expected)
+        # Counts and flags only: no text of the original or the edited message, nor its context.
+        self.assertEqual(
+            [
+                (call.kwargs["event"], call.kwargs["properties"])
+                for call in mock_capture.call_args_list
+                if call.kwargs["event"].startswith("posthog_ai_message_edit_")
+            ],
+            [
+                (
+                    "posthog_ai_message_edit_saved",
+                    {
+                        "task_id": str(task.id),
+                        "run_id": str(latest.id),
+                        "removed_message_count": 3,
+                        "removed_turns_change_project": expected,
+                        "position_from_end": 2,
+                    },
+                )
+            ],
+        )
 
     def _post_edit(self, task: Task, run: TaskRun, address_run: TaskRun, index: int, original_text: str):
         return self.client.post(
@@ -12751,10 +12772,18 @@ class TestTaskRunAPI(BaseTaskAPITest):
             ("text_does_not_match", "other_text", status.HTTP_409_CONFLICT, "conversation_changed"),
         ]
     )
+    @patch("products.tasks.backend.facade.api.posthoganalytics.capture")
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     @patch("posthog.storage.object_storage.read")
     def test_edit_message_preview(
-        self, _name: str, case: str, expected_status: int, expected_code: str | None, mock_read, mock_workflow
+        self,
+        _name: str,
+        case: str,
+        expected_status: int,
+        expected_code: str | None,
+        mock_read,
+        mock_workflow,
+        mock_capture,
     ):
         self._enable_edit_flag(case != "flag_off")
         task, first, latest, logs = self._edit_message_fixture()
@@ -12781,8 +12810,34 @@ class TestTaskRunAPI(BaseTaskAPITest):
                 response.json(),
                 {"removed_message_count": 3, "removed_turns_change_project": case == "project_change"},
             )
+            self.assertEqual(
+                [
+                    (call.kwargs["event"], call.kwargs["properties"])
+                    for call in mock_capture.call_args_list
+                    if call.kwargs["event"].startswith("posthog_ai_message_edit_")
+                ],
+                [
+                    (
+                        "posthog_ai_message_edit_started",
+                        {
+                            "task_id": str(task.id),
+                            "run_id": str(latest.id),
+                            "removed_message_count": 3,
+                            "removed_turns_change_project": case == "project_change",
+                            "position_from_end": 2,
+                        },
+                    )
+                ],
+            )
         else:
             self.assertEqual(response.json()["code"], expected_code)
+            self.assertFalse(
+                [
+                    call
+                    for call in mock_capture.call_args_list
+                    if call.kwargs["event"].startswith("posthog_ai_message_edit_")
+                ]
+            )
         self.assertEqual(task.runs.count(), run_count)
         mock_workflow.assert_not_called()
 

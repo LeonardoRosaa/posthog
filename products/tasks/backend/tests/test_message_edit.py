@@ -13,6 +13,7 @@ from products.tasks.backend.logic.message_edit import (
     edited_message_content,
     history_segments,
     is_agent_command,
+    position_from_end,
     removed_message_count,
     removed_turns_change_project,
     turn_is_complete,
@@ -239,7 +240,7 @@ TOOL_CALL = _session_update({"sessionUpdate": "tool_call", "toolCallId": "t1"})
 class TestRemovedMessageCount(SimpleTestCase):
     @parameterized.expand(
         [
-            ("the_last_message_removes_nothing", [[_user_message("a"), _user_echo("a")]], 0),
+            ("the_last_message_removes_nothing", [[_user_message("a"), _user_echo("a")]], 0, 1),
             (
                 "counts_bubbles_across_runs",
                 [
@@ -254,6 +255,7 @@ class TestRemovedMessageCount(SimpleTestCase):
                     [_user_message("b"), _user_echo("b"), _agent_text("w")],
                 ],
                 4,
+                2,
             ),
             (
                 "markers_and_resume_prompts_are_not_messages",
@@ -265,11 +267,15 @@ class TestRemovedMessageCount(SimpleTestCase):
                     ],
                 ],
                 1,
+                1,
             ),
         ]
     )
-    def test_counts_what_the_edit_removes(self, _name: str, segment_entries: list[list[str]], expected: int) -> None:
+    def test_counts_what_the_edit_removes(
+        self, _name: str, segment_entries: list[list[str]], expected: int, expected_position: int
+    ) -> None:
         self.assertEqual(removed_message_count(segment_entries, 0), expected)
+        self.assertEqual(position_from_end(segment_entries, 0), expected_position)
 
 
 def _posthog_call(command: str, status: str, call_id: str = "c1", tool: str = "mcp__posthog__exec") -> list[str]:

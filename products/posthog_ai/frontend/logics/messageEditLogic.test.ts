@@ -1,4 +1,5 @@
 import { expectLogic } from 'kea-test-utils'
+import posthog from 'posthog-js'
 
 import { FEATURE_FLAGS } from 'lib/constants'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
@@ -22,6 +23,8 @@ import {
     editSaveErrorMessage,
     messageEditBlockedReasons,
     messageEditLogic,
+    MESSAGE_EDIT_CANCELLED_EVENT,
+    positionFromEnd,
     editSaveNotice,
     PROJECT_CHANGES_STAY_NOTICE,
     removedMessagesNotice,
@@ -225,6 +228,47 @@ describe('messageEditLogic', () => {
             .toMatchValues({ removedMessageCountLoading: false, removedMessageCount: null })
     })
 
+    it('counts the edited message from the end among the user messages', () => {
+        const items: ThreadItem[] = [
+            { id: 'first', type: 'human_message', text: 'a' },
+            { id: 'reply', type: 'assistant_message', text: 'b' },
+            { id: 'last', type: 'human_message', text: 'c' },
+        ]
+
+        expect([
+            positionFromEnd(items, 'first'),
+            positionFromEnd(items, 'last'),
+            positionFromEnd(items, 'gone'),
+        ]).toEqual([2, 1, null])
+    })
+
+    it('tracks a cancelled edit once, with counts and no text', async () => {
+        const capture = jest.spyOn(posthog, 'capture').mockImplementation(() => undefined)
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockResolvedValue({
+            removed_message_count: 3,
+            removed_turns_change_project: true,
+        })
+        await expectLogic(logic, () => logic.actions.startEdit(ITEM)).toDispatchActions(['setRemovedMessageCount'])
+        logic.actions.setDraft('show weekly signups')
+
+        logic.actions.cancelEdit()
+        logic.actions.cancelEdit()
+
+        expect(capture.mock.calls).toEqual([
+            [
+                MESSAGE_EDIT_CANCELLED_EVENT,
+                {
+                    task_id: 'task-1',
+                    run_id: 'run-1',
+                    removed_message_count: 3,
+                    removed_turns_change_project: true,
+                    position_from_end: null,
+                },
+            ],
+        ])
+        capture.mockRestore()
+    })
+
     it('drops a count that arrives after the editor closed', async () => {
         let answer: (value: TaskRunMessageEditPreviewResponseApi) => void = () => {}
         const preview = new Promise<TaskRunMessageEditPreviewResponseApi>((resolve) => (answer = resolve))
@@ -243,8 +287,13 @@ describe('messageEditLogic', () => {
     it('saves the edit at the message address and moves the thread to the new run', async () => {
         const run = { id: 'run-2', task: 'task-1', status: 'queued' } as TaskRunDetailDTOApi
         jest.mocked(tasksRunsEditMessageCreate).mockResolvedValue({ run })
+        const capture = jest.spyOn(posthog, 'capture').mockImplementation(() => undefined)
 
         await saveEdit('saveEditSuccess')
+
+        // The backend tracks the save, so closing the editor this way is not a cancel.
+        expect(capture).not.toHaveBeenCalled()
+        capture.mockRestore()
 
         expect(tasksRunsEditMessageCreate).toHaveBeenCalledWith(
             String(stream.values.currentProjectId),

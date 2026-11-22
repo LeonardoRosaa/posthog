@@ -269,7 +269,20 @@ def removed_message_count(segment_entries: Sequence[Sequence[str]], index: int) 
     once per stretch of text between tool calls, thinking and markers. The edited message itself is replaced, not
     removed, so it does not count.
     """
-    count = 0
+    user, agent = _messages_after(segment_entries, index)
+    return user + agent
+
+
+def position_from_end(segment_entries: Sequence[Sequence[str]], index: int) -> int:
+    """The edited message's place among the user's messages, counted from the end of the conversation: 1 is the
+    last one. The same rule as `positionFromEnd` in the PostHog AI frontend."""
+    user, _ = _messages_after(segment_entries, index)
+    return user + 1
+
+
+def _messages_after(segment_entries: Sequence[Sequence[str]], index: int) -> tuple[int, int]:
+    user = 0
+    agent = 0
     # The entries right after the edited message are its own echoes, so they start as part of a user message.
     previous = "user"
     for position, entries in enumerate(segment_entries):
@@ -279,7 +292,7 @@ def removed_message_count(segment_entries: Sequence[Sequence[str]], index: int) 
             if _is_user_entry(notification):
                 human = human_text(method if isinstance(method, str) else None, _params(notification))
                 if previous != "user" and human is not None and is_turn_text(human.text):
-                    count += 1
+                    user += 1
                 previous = "user"
                 continue
             if method in _MARKER_METHODS:
@@ -290,11 +303,11 @@ def removed_message_count(segment_entries: Sequence[Sequence[str]], index: int) 
             kind = _session_update(notification).get("sessionUpdate")
             if kind in ("agent_message_chunk", "agent_message"):
                 if previous != "agent":
-                    count += 1
+                    agent += 1
                 previous = "agent"
             elif kind in _MESSAGE_BREAKS:
                 previous = "tool"
-    return count
+    return user, agent
 
 
 def turn_is_complete(entries: Sequence[str]) -> bool:

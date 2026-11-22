@@ -155,6 +155,7 @@ from products.tasks.backend.logic.message_edit import (
     history_segments,
     is_agent_command,
     log_cut_from_state,
+    position_from_end,
     removed_message_count,
     removed_turns_change_project,
     turn_is_complete,
@@ -10901,6 +10902,33 @@ def _removed_turns_change_project(address: _EditAddress, index: int) -> bool:
     return removed_turns_change_project(address.kept_entries, index, read_only)
 
 
+# Event names pinned for analytics: renaming them breaks dashboards. The frontend captures the cancel event.
+MESSAGE_EDIT_STARTED_EVENT = "posthog_ai_message_edit_started"
+MESSAGE_EDIT_SAVED_EVENT = "posthog_ai_message_edit_saved"
+
+
+def _capture_message_edit(
+    event: str, run: TaskRun, user_id: int, address: _EditAddress, index: int, *, changes_project: bool
+) -> None:
+    """Record an edit for usage analytics. Counts and flags only: never the message text or its context."""
+    try:
+        distinct_id = User.objects.filter(id=user_id).values_list("distinct_id", flat=True).first()
+        posthoganalytics.capture(
+            distinct_id=str(distinct_id or run.team.uuid),
+            event=event,
+            properties={
+                "task_id": str(run.task_id),
+                "run_id": str(run.id),
+                "removed_message_count": removed_message_count(address.kept_entries, index),
+                "removed_turns_change_project": changes_project,
+                "position_from_end": position_from_end(address.kept_entries, index),
+            },
+            groups=groups(team=run.team),
+        )
+    except Exception as e:
+        logger.warning("Could not capture %s for run %s: %s", event, run.id, e)
+
+
 def _edit_address(run: TaskRun, *, message_run_id: str, index: int, original_text: str) -> _EditAddress | None:
     """The user message at an address in ``run``'s conversation, or ``None`` when the address no longer points at
     a user message with ``original_text``, so the conversation changed after the client loaded it."""
@@ -10955,9 +10983,12 @@ def preview_task_run_message_edit(
     address = _edit_address(run, message_run_id=message_run_id, index=index, original_text=original_text)
     if address is None:
         return contracts.TaskRunMessageEditPreview(refusal=Refusal.CONVERSATION_CHANGED)
+    changes_project = _removed_turns_change_project(address, index)
+    # The client asks for the preview once, as the editor opens, so this is where an edit starts.
+    _capture_message_edit(MESSAGE_EDIT_STARTED_EVENT, run, user_id, address, index, changes_project=changes_project)
     return contracts.TaskRunMessageEditPreview(
         removed_message_count=removed_message_count(address.kept_entries, index),
-        removed_turns_change_project=_removed_turns_change_project(address, index),
+        removed_turns_change_project=changes_project,
     )
 
 
@@ -11048,9 +11079,10 @@ def edit_task_run_message(
     )
     if result is None:
         return None
-    return contracts.TaskRunMessageEditResult(
-        run=result, removed_turns_change_project=_removed_turns_change_project(address, index)
-    )
+    changes_project = _removed_turns_change_project(address, index)
+    if result.error is None:
+        _capture_message_edit(MESSAGE_EDIT_SAVED_EVENT, run, user_id, address, index, changes_project=changes_project)
+    return contracts.TaskRunMessageEditResult(run=result, removed_turns_change_project=changes_project)
 
 
 # --- Task presence beacons ---
