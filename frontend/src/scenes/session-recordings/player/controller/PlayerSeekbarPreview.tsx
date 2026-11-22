@@ -48,8 +48,14 @@ const PlayerSeekbarPreviewFrame = ({
 
     const { setPause, seekToTime } = useActions(sessionRecordingPlayerLogic(seekPlayerLogicProps))
 
+    // Each seek can rebuild the page, so a debounce that settles back on the frame already drawn skips it.
+    const lastSoughtMs = useRef<number | null>(null)
     const debouncedSeekToTime = useDebouncedCallback(
         (time: number) => {
+            if (time === lastSoughtMs.current) {
+                return
+            }
+            lastSoughtMs.current = time
             setPause()
             seekToTime(time)
         },
@@ -60,9 +66,11 @@ const PlayerSeekbarPreviewFrame = ({
     )
 
     useEffect(() => {
-        if (isVisible && targetMs !== null) {
-            debouncedSeekToTime(targetMs)
+        if (!isVisible || targetMs === null) {
+            debouncedSeekToTime.cancel()
+            return
         }
+        debouncedSeekToTime(targetMs)
     }, [targetMs, isVisible]) // oxlint-disable-line react-hooks/exhaustive-deps
 
     // Hidden rather than unmounted when there is no frame to show, so the next hover with a frame
