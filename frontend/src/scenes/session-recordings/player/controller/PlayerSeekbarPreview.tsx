@@ -13,7 +13,6 @@ import { TimestampFormat } from '../playerSettingsLogic'
 import {
     SessionRecordingPlayerLogicProps,
     SessionRecordingPlayerMode,
-    findSegmentForTimestamp,
     sessionRecordingPlayerLogic,
 } from '../sessionRecordingPlayerLogic'
 import { seekbarPreviewTarget, urlAtTimestamp } from './seekbarPreviewTarget'
@@ -125,7 +124,7 @@ export const PlayerSeekbarPreview = memo(function PlayerSeekbarPreview({
             showPreviewFrame
                 ? seekbarPreviewTarget(
                       hoverTimestamp,
-                      findSegmentForTimestamp(sessionPlayerData.segments, hoverTimestamp),
+                      sessionPlayerData.segments,
                       sessionPlayerData.snapshotsByWindowId
                   )
                 : null,
@@ -177,7 +176,7 @@ export const PlayerSeekbarPreview = memo(function PlayerSeekbarPreview({
                     {canShowPreview && <PlayerSeekbarPreviewFrame targetMs={previewTargetMs} isVisible={isHovering} />}
                     <div className="text-center p-2">{content}</div>
                     {fallbackUrl ? (
-                        <div className="max-w-60 truncate px-2 pb-2 text-center font-normal text-secondary">
+                        <div className="max-w-60 truncate px-2 pb-2 text-center font-normal opacity-75">
                             {fallbackUrl}
                         </div>
                     ) : null}

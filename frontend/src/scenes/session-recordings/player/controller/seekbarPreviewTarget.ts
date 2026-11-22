@@ -18,45 +18,85 @@ export type SeekbarPreviewTarget =
 
 export function seekbarPreviewTarget(
     hoverTimestamp: number,
-    segment: RecordingSegment | null,
+    segments: RecordingSegment[],
     snapshotsByWindowId: Record<number, eventWithTime[]>,
     maxEventsToReplay: number = MAX_EVENTS_TO_REPLAY
 ): SeekbarPreviewTarget {
-    if (!segment || segment.windowId === undefined) {
+    const windowed = windowedSegmentAt(segments, hoverTimestamp)
+    const events = windowed ? snapshotsByWindowId[windowed.windowId] : undefined
+    if (!windowed || !events?.length) {
         return { kind: 'url-only', reason: 'no-window' }
     }
-    const events = snapshotsByWindowId[segment.windowId]
-    if (!events?.length) {
-        return { kind: 'url-only', reason: 'no-window' }
+    const { segment } = windowed
+
+    const clamped = Math.min(Math.max(windowed.timestamp, segment.startTimestamp), segment.endTimestamp)
+    const hoverIndex = lastIndexAtOrBefore(events, clamped)
+    const fullSnapshotIndex = lastFullSnapshotAtOrBefore(events, hoverIndex)
+    if (fullSnapshotIndex === -1) {
+        return { kind: 'url-only', reason: 'no-full-snapshot' }
     }
 
     // The user did not interact during an inactive segment, so its first frame stands for all of it.
-    const clamped = Math.min(Math.max(hoverTimestamp, segment.startTimestamp), segment.endTimestamp)
-    const timestamp = segment.isActive
+    // A full snapshot inside the segment (a page load while idle) shows a different page, so the
+    // target never moves back past the last full snapshot before the hovered time.
+    const snapped = segment.isActive
         ? segment.startTimestamp + Math.floor((clamped - segment.startTimestamp) / PREVIEW_STEP_MS) * PREVIEW_STEP_MS
         : segment.startTimestamp
+    const timestamp = Math.max(snapped, events[fullSnapshotIndex].timestamp)
 
-    const replayCount = eventsToReplay(events, timestamp, maxEventsToReplay)
-    if (replayCount === 'no-full-snapshot') {
-        return { kind: 'url-only', reason: 'no-full-snapshot' }
-    }
+    const replayCount = lastIndexAtOrBefore(events, timestamp) - fullSnapshotIndex + 1
     if (replayCount > maxEventsToReplay) {
         return { kind: 'url-only', reason: 'too-many-events' }
     }
     return { kind: 'frame', timestamp }
 }
 
-function eventsToReplay(events: eventWithTime[], timestamp: number, limit: number): number | 'no-full-snapshot' {
-    const lastIndex = lastIndexAtOrBefore(events, timestamp)
-    for (let index = lastIndex, count = 1; index >= 0; index--, count++) {
-        if (events[index].type === EventType.FullSnapshot) {
-            return count
+// A gap has no window to draw, so it shows the last frame of the window before it, as the main
+// player does when playback reaches a gap.
+function windowedSegmentAt(
+    segments: RecordingSegment[],
+    timestamp: number
+): { segment: RecordingSegment; windowId: number; timestamp: number } | null {
+    let previous: (RecordingSegment & { windowId: number }) | null = null
+    for (const segment of segments) {
+        if (segment.startTimestamp > timestamp) {
+            break
         }
-        if (count > limit) {
-            return count
+        const hasWindow = segment.windowId !== undefined
+        if (timestamp <= segment.endTimestamp) {
+            if (hasWindow) {
+                return { segment, windowId: segment.windowId as number, timestamp }
+            }
+            break
+        }
+        if (hasWindow) {
+            previous = segment as RecordingSegment & { windowId: number }
         }
     }
-    return 'no-full-snapshot'
+    return previous ? { segment: previous, windowId: previous.windowId, timestamp: previous.endTimestamp } : null
+}
+
+// Cached per events array because the hover handler calls this on every mouse move, and a scan
+// back to the last full snapshot would read the whole recording when full snapshots are sparse.
+const fullSnapshotIndicesCache = new WeakMap<eventWithTime[], number[]>()
+
+function lastFullSnapshotAtOrBefore(events: eventWithTime[], index: number): number {
+    let indices = fullSnapshotIndicesCache.get(events)
+    if (!indices) {
+        indices = events.flatMap((event, i) => (event.type === EventType.FullSnapshot ? [i] : []))
+        fullSnapshotIndicesCache.set(events, indices)
+    }
+    let found = -1
+    for (let low = 0, high = indices.length - 1; low <= high; ) {
+        const middle = Math.floor((low + high) / 2)
+        if (indices[middle] <= index) {
+            found = indices[middle]
+            low = middle + 1
+        } else {
+            high = middle - 1
+        }
+    }
+    return found
 }
 
 function lastIndexAtOrBefore(events: eventWithTime[], timestamp: number): number {
