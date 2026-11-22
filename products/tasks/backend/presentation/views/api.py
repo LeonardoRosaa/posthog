@@ -3647,7 +3647,7 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         responses={
             200: OpenApiResponse(
                 response=TaskRunMessageEditPreviewResponseSerializer,
-                description="How many messages saving the edit would remove",
+                description="How many messages saving the edit would remove, and whether they changed the project",
             ),
             403: OpenApiResponse(
                 response=TaskRunErrorResponseSerializer,
@@ -3697,7 +3697,12 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                 status=status_code,
             )
         return Response(
-            TaskRunMessageEditPreviewResponseSerializer({"removed_message_count": preview.removed_message_count}).data
+            TaskRunMessageEditPreviewResponseSerializer(
+                {
+                    "removed_message_count": preview.removed_message_count,
+                    "removed_turns_change_project": preview.removed_turns_change_project,
+                }
+            ).data
         )
 
     @validated_request(

@@ -5744,6 +5744,13 @@ class TaskRunMessageEditPreviewResponseSerializer(serializers.Serializer):
             "removes. Tool calls and markers are not counted."
         ),
     )
+    removed_turns_change_project = serializers.BooleanField(
+        help_text=(
+            "Whether the turns saving the edit removes made successful PostHog tool calls that change the project, "
+            "such as creating a dashboard. Tools the MCP catalogue marks read-only and catalogue lookups don't count; "
+            "a tool missing from the catalogue does. Saving the edit leaves those changes in place."
+        ),
+    )
 
 
 class TaskRunMessageEditResponseSerializer(serializers.Serializer):

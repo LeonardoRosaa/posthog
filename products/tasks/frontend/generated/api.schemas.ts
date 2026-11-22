@@ -4113,6 +4113,8 @@ export interface TaskRunMessageEditPreviewResponseApi {
      * @minimum 0
      */
     removed_message_count: number
+    /** Whether the turns saving the edit removes made successful PostHog tool calls that change the project, such as creating a dashboard. Tools the MCP catalogue marks read-only and catalogue lookups don't count; a tool missing from the catalogue does. Saving the edit leaves those changes in place. */
+    removed_turns_change_project: boolean
 }
 
 export interface TaskRunRelayMessageRequestApi {

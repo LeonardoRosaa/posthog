@@ -12557,6 +12557,44 @@ class TestTaskRunAPI(BaseTaskAPITest):
         }
         return task, first, latest, logs
 
+    @staticmethod
+    def _posthog_exec_call(command: str, status: str = "completed") -> list[str]:
+        started = {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-1",
+            "_meta": {"claudeCode": {"toolName": "mcp__posthog__exec"}},
+            "rawInput": {"command": command},
+        }
+        finished = {"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": status}
+        return [
+            json.dumps({"notification": {"method": "session/update", "params": {"update": update}}})
+            for update in (started, finished)
+        ]
+
+    @parameterized.expand([("a_write_tool_call", "completed", True), ("a_failed_call", "failed", False)])
+    @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
+    @patch("posthog.storage.object_storage.read")
+    def test_saving_an_edit_reports_project_changes_in_the_removed_turns(
+        self, _name: str, call_status: str, expected: bool, mock_read, _mock_workflow
+    ):
+        task, first, latest, logs = self._edit_message_fixture()
+        logs[latest.log_url][1:1] = self._posthog_exec_call("call dashboard-create {}", call_status)
+        mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
+
+        result = tasks_facade.edit_task_run_message(
+            task.id,
+            latest.id,
+            self.team.id,
+            self.user.id,
+            message_run_id=str(first.id),
+            index=1,
+            original_text="show signups",
+            text="show weekly signups",
+        )
+
+        assert result is not None and result.run is not None
+        self.assertEqual(result.removed_turns_change_project, expected)
+
     def _post_edit(self, task: Task, run: TaskRun, address_run: TaskRun, index: int, original_text: str):
         return self.client.post(
             f"/api/projects/@current/tasks/{task.id}/runs/{run.id}/edit_message/",
@@ -12707,6 +12745,7 @@ class TestTaskRunAPI(BaseTaskAPITest):
     @parameterized.expand(
         [
             ("counts_the_messages_after_the_cut_across_runs", "count", status.HTTP_200_OK, None),
+            ("notes_project_changes_in_the_removed_turns", "project_change", status.HTTP_200_OK, None),
             ("flag_off", "flag_off", status.HTTP_403_FORBIDDEN, "edit_messages_disabled"),
             ("not_the_task_creator", "no_creator", status.HTTP_403_FORBIDDEN, "not_task_creator"),
             ("text_does_not_match", "other_text", status.HTTP_409_CONFLICT, "conversation_changed"),
@@ -12722,6 +12761,8 @@ class TestTaskRunAPI(BaseTaskAPITest):
         mock_read.side_effect = lambda path, missing_ok=False: "".join(f"{entry}\n" for entry in logs.get(path, []))
         if case == "no_creator":
             Task.objects.filter(id=task.id).update(created_by=None)
+        if case == "project_change":
+            logs[latest.log_url][1:1] = self._posthog_exec_call('call dashboard-create {"name": "Churn"}')
         run_count = task.runs.count()
 
         response = self.client.post(
@@ -12736,7 +12777,10 @@ class TestTaskRunAPI(BaseTaskAPITest):
         self.assertEqual(response.status_code, expected_status, response.json())
         if expected_code is None:
             # The agent's reply in the first run, then the next question and its reply in the latest run.
-            self.assertEqual(response.json(), {"removed_message_count": 3})
+            self.assertEqual(
+                response.json(),
+                {"removed_message_count": 3, "removed_turns_change_project": case == "project_change"},
+            )
         else:
             self.assertEqual(response.json()["code"], expected_code)
         self.assertEqual(task.runs.count(), run_count)

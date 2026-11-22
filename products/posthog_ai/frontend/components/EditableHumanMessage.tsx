@@ -6,7 +6,7 @@ import {
     messageEditLogic,
     type MessageEditLogicProps,
     REMOVED_MESSAGES_LOADING,
-    removedMessagesNotice,
+    editSaveNotice,
 } from '../logics/messageEditLogic'
 import type { ThreadItem } from '../types/streamTypes'
 import { HumanMessageEditor } from './HumanMessageEditor'
@@ -26,9 +26,8 @@ function OpenMessageEditor({
     /** A reason that appeared after the editor opened. It holds the save, and the draft stays. */
     blockedReason?: string
 }): JSX.Element {
-    const { draft, saving, saveError, removedMessageCount, removedMessageCountLoading } = useValues(
-        messageEditLogic(editing)
-    )
+    const { draft, saving, saveError, removedMessageCount, removedMessageCountLoading, removedTurnsChangeProject } =
+        useValues(messageEditLogic(editing))
     const { setDraft, cancelEdit, saveEdit } = useActions(messageEditLogic(editing))
     const trimmed = draft.trim()
     const Editor = quill ? QuillHumanMessageEditor : HumanMessageEditor
@@ -39,7 +38,7 @@ function OpenMessageEditor({
             onSave={() => saveEdit(item)}
             onCancel={cancelEdit}
             saving={saving}
-            notice={removedMessagesNotice(removedMessageCount)}
+            notice={editSaveNotice(removedMessageCount, removedTurnsChangeProject)}
             noticeLoadingText={removedMessageCountLoading ? REMOVED_MESSAGES_LOADING : null}
             error={saveError ?? blockedReason ?? null}
             saveDisabledReason={

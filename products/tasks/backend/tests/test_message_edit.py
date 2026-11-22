@@ -14,6 +14,7 @@ from products.tasks.backend.logic.message_edit import (
     history_segments,
     is_agent_command,
     removed_message_count,
+    removed_turns_change_project,
     turn_is_complete,
 )
 from products.tasks.backend.models import TaskRun
@@ -269,3 +270,53 @@ class TestRemovedMessageCount(SimpleTestCase):
     )
     def test_counts_what_the_edit_removes(self, _name: str, segment_entries: list[list[str]], expected: int) -> None:
         self.assertEqual(removed_message_count(segment_entries, 0), expected)
+
+
+def _posthog_call(command: str, status: str, call_id: str = "c1", tool: str = "mcp__posthog__exec") -> list[str]:
+    started = {"sessionUpdate": "tool_call", "toolCallId": call_id, "_meta": {"claudeCode": {"toolName": tool}}}
+    return [
+        _session_update({**started, "rawInput": {"command": command}}),
+        _session_update({"sessionUpdate": "tool_call_update", "toolCallId": call_id, "status": status}),
+    ]
+
+
+READ_ONLY_TOOLS = frozenset({"execute-sql"})
+
+
+class TestRemovedTurnsChangeProject(SimpleTestCase):
+    @parameterized.expand(
+        [
+            (
+                "a_write_tool_changes_the_project",
+                _posthog_call('call dashboard-create {"name": "x"}', "completed"),
+                True,
+            ),
+            (
+                "flags_before_a_read_only_tool",
+                _posthog_call('call --json --confirm execute-sql {"query": "SELECT 1"}', "completed"),
+                False,
+            ),
+            ("an_unreadable_command_counts", _posthog_call("frobnicate dashboards", "completed"), True),
+            ("a_read_only_tool_does_not", _posthog_call('call execute-sql {"query": "SELECT 1"}', "completed"), False),
+            ("a_failed_call_does_not", _posthog_call("call dashboard-create {}", "failed"), False),
+            ("a_tool_missing_from_the_catalogue_does", _posthog_call("call brand-new-tool {}", "completed"), True),
+            ("listing_tools_does_not", _posthog_call("tools", "completed"), False),
+            ("searching_tools_does_not", _posthog_call("search dashboard", "completed"), False),
+            ("describing_a_tool_does_not", _posthog_call("info dashboard-create", "completed"), False),
+            (
+                "a_direct_posthog_tool_counts_too",
+                _posthog_call("", "completed", tool="mcp__posthog__dashboard-create"),
+                True,
+            ),
+            ("another_server_does_not", _posthog_call("call dashboard-create {}", "completed", tool="Bash"), False),
+        ]
+    )
+    def test_reads_the_removed_tool_calls(self, _name: str, calls: list[str], expected: bool) -> None:
+        segments = [[_user_message("a")], [_user_message("b"), *calls]]
+
+        self.assertEqual(removed_turns_change_project(segments, 0, READ_ONLY_TOOLS), expected)
+
+    def test_a_change_before_the_edited_message_stays_in_the_history(self) -> None:
+        segments = [[*_posthog_call("call dashboard-create {}", "completed"), _user_message("a"), _agent_text("ok")]]
+
+        self.assertFalse(removed_turns_change_project(segments, 2, READ_ONLY_TOOLS))

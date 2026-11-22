@@ -647,6 +647,8 @@ class TaskRunMessageEditResult:
 
     refusal: TaskRunMessageEditRefusal | None = None
     run: TaskRunResult | None = None
+    # Whether the removed turns made PostHog tool calls that change the user's project, the preview's value again.
+    removed_turns_change_project: bool = False
 
 
 @dataclass(frozen=True)
@@ -656,6 +658,8 @@ class TaskRunMessageEditPreview:
 
     refusal: TaskRunMessageEditRefusal | None = None
     removed_message_count: int | None = None
+    # Whether the removed turns made PostHog tool calls that change the user's project. Those changes stay.
+    removed_turns_change_project: bool = False
 
 
 @dataclass(frozen=True)

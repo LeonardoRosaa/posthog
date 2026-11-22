@@ -7,7 +7,7 @@ address, and drops the runs between that run and the cut.
 
 import re
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -178,6 +178,87 @@ def cleared_after(segment_entries: Sequence[Sequence[str]], index: int) -> bool:
 
 _MESSAGE_BREAKS = frozenset({"tool_call", "agent_thought_chunk"})
 _MARKER_METHODS = frozenset({"_posthog/compact_boundary", "_posthog/conversation_cleared"})
+
+
+# The PostHog MCP server under any of the names a harness gives it, as `isPostHogExecTool` in the frontend reads it.
+_POSTHOG_MCP_TOOL = re.compile(r"^mcp__(?:plugin_)?posthog(?:_[^_]+)*__(?P<tool>.+)$")
+# The `exec` verbs that only read the tool catalogue. `call` runs a tool; anything else is refused by the server.
+_EXEC_CATALOG_VERBS = frozenset({"tools", "search", "info", "schema", "help", "learn"})
+# The flags the server strips before the tool name of a `call`, as `parseCallFlags` in services/mcp reads them.
+_EXEC_CALL_FLAGS = frozenset({"--json", "--confirm", "--no-skills"})
+_UNREADABLE_EXEC_COMMAND = "<unreadable exec command>"
+
+
+def _dict(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _tool_call_name(update: Mapping[str, Any]) -> str | None:
+    meta = _dict(update.get("_meta"))
+    claude = _dict(meta.get("claudeCode"))
+    posthog = _dict(meta.get("posthog"))
+    mcp = _dict(posthog.get("mcp"))
+    if isinstance(mcp.get("server"), str) and isinstance(mcp.get("tool"), str):
+        return f"mcp__{mcp['server']}__{mcp['tool']}"
+    for name in (claude.get("toolName"), posthog.get("toolName")):
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def _posthog_tool_called(name: str, command: object) -> str | None:
+    """The PostHog tool a call ran, ``""`` for a catalogue lookup, or ``None`` for a call to another tool.
+
+    A harness that runs PostHog tools through the single ``exec`` tool names the inner tool only in the command, such
+    as ``call --json dashboard-create {...}``.
+    """
+    match = _POSTHOG_MCP_TOOL.match(name)
+    if match is None:
+        return None
+    if match.group("tool") != "exec":
+        return match.group("tool")
+    words = command.split() if isinstance(command, str) else []
+    verb = words[0].lower() if words else ""
+    if verb in _EXEC_CATALOG_VERBS:
+        return ""
+    tool = next((word for word in words[1:] if word not in _EXEC_CALL_FLAGS), None) if verb == "call" else None
+    # A command whose tool can't be read names no catalogued tool, so it counts as a change.
+    return tool or _UNREADABLE_EXEC_COMMAND
+
+
+def removed_turns_change_project(
+    segment_entries: Sequence[Sequence[str]], index: int, read_only_tools: Collection[str]
+) -> bool:
+    """Whether the turns an edit at ``index`` of the first segment removes changed the user's PostHog project.
+
+    ``segment_entries`` is what ``removed_message_count`` reads. A successful PostHog tool call counts unless the MCP
+    tool catalogue marks the tool read-only, so a tool the catalogue doesn't hold counts too. Failed calls and
+    catalogue lookups don't count.
+    """
+    calls: dict[str, dict[str, Any]] = {}
+    for position, entries in enumerate(segment_entries):
+        for line in entries[index + 1 :] if position == 0 else entries:
+            if "tool_call" not in line:
+                continue
+            update = _session_update(_notification(line))
+            call_id = update.get("toolCallId")
+            if update.get("sessionUpdate") not in ("tool_call", "tool_call_update") or not isinstance(call_id, str):
+                continue
+            call = calls.setdefault(call_id, {})
+            if (name := _tool_call_name(update)) is not None:
+                call["name"] = name
+            raw_input = update.get("rawInput")
+            if isinstance(raw_input, dict) and isinstance(raw_input.get("command"), str):
+                call["command"] = raw_input["command"]
+            if isinstance(update.get("status"), str):
+                call["status"] = update["status"]
+    for call in calls.values():
+        if call.get("status") != "completed" or not isinstance(call.get("name"), str):
+            continue
+        tool = _posthog_tool_called(call["name"], call.get("command"))
+        if tool and tool not in read_only_tools:
+            return True
+    return False
 
 
 def removed_message_count(segment_entries: Sequence[Sequence[str]], index: int) -> int:

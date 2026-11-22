@@ -156,6 +156,7 @@ from products.tasks.backend.logic.message_edit import (
     is_agent_command,
     log_cut_from_state,
     removed_message_count,
+    removed_turns_change_project,
     turn_is_complete,
 )
 from products.tasks.backend.logic.model_access import InvalidModelAccess, resolve_model_access
@@ -10891,6 +10892,15 @@ class _EditAddress:
     kept_entries: list[list[str]]
 
 
+def _removed_turns_change_project(address: _EditAddress, index: int) -> bool:
+    from posthog.mcp_tool_definitions import (  # noqa: PLC0415 — reads the tool catalogue files on first use
+        get_mcp_tool_definitions,
+    )
+
+    read_only = {name for name, definition in get_mcp_tool_definitions().items() if definition.read_only}
+    return removed_turns_change_project(address.kept_entries, index, read_only)
+
+
 def _edit_address(run: TaskRun, *, message_run_id: str, index: int, original_text: str) -> _EditAddress | None:
     """The user message at an address in ``run``'s conversation, or ``None`` when the address no longer points at
     a user message with ``original_text``, so the conversation changed after the client loaded it."""
@@ -10945,7 +10955,10 @@ def preview_task_run_message_edit(
     address = _edit_address(run, message_run_id=message_run_id, index=index, original_text=original_text)
     if address is None:
         return contracts.TaskRunMessageEditPreview(refusal=Refusal.CONVERSATION_CHANGED)
-    return contracts.TaskRunMessageEditPreview(removed_message_count=removed_message_count(address.kept_entries, index))
+    return contracts.TaskRunMessageEditPreview(
+        removed_message_count=removed_message_count(address.kept_entries, index),
+        removed_turns_change_project=_removed_turns_change_project(address, index),
+    )
 
 
 def edit_task_run_message(
@@ -11033,7 +11046,11 @@ def edit_task_run_message(
         edit_cut=LogCut(run_id=message_run_id, index=index),
         carried_artifacts=carried_artifacts,
     )
-    return contracts.TaskRunMessageEditResult(run=result) if result is not None else None
+    if result is None:
+        return None
+    return contracts.TaskRunMessageEditResult(
+        run=result, removed_turns_change_project=_removed_turns_change_project(address, index)
+    )
 
 
 # --- Task presence beacons ---

@@ -10,7 +10,10 @@ import {
     tasksRunsEditMessagePreviewCreate,
     tasksRunsRetrieve,
 } from 'products/tasks/frontend/generated/api'
-import type { TaskRunDetailDTOApi } from 'products/tasks/frontend/generated/api.schemas'
+import type {
+    TaskRunDetailDTOApi,
+    TaskRunMessageEditPreviewResponseApi,
+} from 'products/tasks/frontend/generated/api.schemas'
 
 import type { ThreadItem } from '../types/streamTypes'
 import {
@@ -19,6 +22,8 @@ import {
     editSaveErrorMessage,
     messageEditBlockedReasons,
     messageEditLogic,
+    editSaveNotice,
+    PROJECT_CHANGES_STAY_NOTICE,
     removedMessagesNotice,
     runEditBlockedReason,
     type RunEditState,
@@ -47,7 +52,10 @@ describe('messageEditLogic', () => {
         initKeaTests()
         onRunStarted.mockReset()
         jest.mocked(tasksRunsEditMessageCreate).mockReset()
-        jest.mocked(tasksRunsEditMessagePreviewCreate).mockReset().mockResolvedValue({ removed_message_count: 0 })
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockReset().mockResolvedValue({
+            removed_message_count: 0,
+            removed_turns_change_project: false,
+        })
         // The bootstrap never answers, so the stream stays on the run each test points it at.
         jest.mocked(tasksRunsRetrieve)
             .mockReset()
@@ -177,13 +185,29 @@ describe('messageEditLogic', () => {
         expect(removedMessagesNotice(count)).toBe(expected)
     })
 
+    it.each<[number | null, boolean, string | null]>([
+        [3, true, `Saving removes the 3 messages after this one. ${PROJECT_CHANGES_STAY_NOTICE}`],
+        [3, false, 'Saving removes the 3 messages after this one.'],
+        [0, false, null],
+        [null, false, null],
+    ])('says project changes stay when %s messages go and changes is %s', (count, changesProject, expected) => {
+        expect(editSaveNotice(count, changesProject)).toBe(expected)
+    })
+
     it('loads the removed-message count when the editor opens', async () => {
-        jest.mocked(tasksRunsEditMessagePreviewCreate).mockResolvedValue({ removed_message_count: 3 })
+        jest.mocked(tasksRunsEditMessagePreviewCreate).mockResolvedValue({
+            removed_message_count: 3,
+            removed_turns_change_project: true,
+        })
 
         await expectLogic(logic, () => logic.actions.startEdit(ITEM))
             .toMatchValues({ removedMessageCountLoading: true, removedMessageCount: null })
             .toDispatchActions(['setRemovedMessageCount'])
-            .toMatchValues({ removedMessageCountLoading: false, removedMessageCount: 3 })
+            .toMatchValues({
+                removedMessageCountLoading: false,
+                removedMessageCount: 3,
+                removedTurnsChangeProject: true,
+            })
 
         expect(tasksRunsEditMessagePreviewCreate).toHaveBeenCalledWith(
             String(stream.values.currentProjectId),
@@ -202,13 +226,13 @@ describe('messageEditLogic', () => {
     })
 
     it('drops a count that arrives after the editor closed', async () => {
-        let answer: (value: { removed_message_count: number }) => void = () => {}
-        const preview = new Promise<{ removed_message_count: number }>((resolve) => (answer = resolve))
+        let answer: (value: TaskRunMessageEditPreviewResponseApi) => void = () => {}
+        const preview = new Promise<TaskRunMessageEditPreviewResponseApi>((resolve) => (answer = resolve))
         jest.mocked(tasksRunsEditMessagePreviewCreate).mockReturnValue(preview)
 
         logic.actions.startEdit(ITEM)
         logic.actions.cancelEdit()
-        answer({ removed_message_count: 3 })
+        answer({ removed_message_count: 3, removed_turns_change_project: false })
         await preview
         // One more turn of the queue lets the listener run its code after the await.
         await Promise.resolve()

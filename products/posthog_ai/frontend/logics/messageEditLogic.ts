@@ -31,6 +31,7 @@ export interface messageEditLogicValues {
     queuedMessageCount: number
     removedMessageCount: number | null
     removedMessageCountLoading: boolean
+    removedTurnsChangeProject: boolean
     runEditBlockedReason: string | null
     saveError: string | null
     saving: boolean
@@ -60,7 +61,11 @@ export interface messageEditLogicActions {
         queuedMessageCount: number
         startedFromSlack: boolean
     }
-    setRemovedMessageCount: (count: number | null) => {
+    setRemovedMessageCount: (
+        count: number | null,
+        changesProject?: boolean
+    ) => {
+        changesProject: boolean
         count: number | null
     }
     setDraft: (draft: string) => {
@@ -109,6 +114,15 @@ export const REMOVED_MESSAGES_LOADING = 'Counting the messages after this one'
  * What the editor says about the messages saving removes. Nothing when none would go, or when the count is unknown
  * because the preview failed: a wrong count would be worse than none.
  */
+export const PROJECT_CHANGES_STAY_NOTICE =
+    'Changes they made to your project, such as new insights or dashboards, stay as they are.'
+
+/** The editor's notice: what saving removes, and that project changes those messages made are kept. */
+export function editSaveNotice(count: number | null, changesProject: boolean): string | null {
+    const removed = removedMessagesNotice(count)
+    return removed && changesProject ? `${removed} ${PROJECT_CHANGES_STAY_NOTICE}` : removed
+}
+
 export function removedMessagesNotice(count: number | null): string | null {
     if (count === null || count === 0) {
         return null
@@ -239,7 +253,10 @@ export const messageEditLogic = kea<messageEditLogicType>([
             queuedMessageCount,
         }),
         /** Internal: the preview's count for the open editor, or null when it could not be loaded. */
-        setRemovedMessageCount: (count: number | null) => ({ count }),
+        setRemovedMessageCount: (count: number | null, changesProject: boolean = false) => ({
+            count,
+            changesProject,
+        }),
     }),
     reducers({
         startedFromSlack: [false, { setEditContext: (_, { startedFromSlack }) => startedFromSlack }],
@@ -268,6 +285,15 @@ export const messageEditLogic = kea<messageEditLogicType>([
                 setRemovedMessageCount: (_, { count }) => count,
                 cancelEdit: () => null,
                 saveEditSuccess: () => null,
+            },
+        ],
+        removedTurnsChangeProject: [
+            false,
+            {
+                openEditor: () => false,
+                setRemovedMessageCount: (_, { changesProject }) => changesProject,
+                cancelEdit: () => false,
+                saveEditSuccess: () => false,
             },
         ],
         removedMessageCountLoading: [
@@ -346,18 +372,20 @@ export const messageEditLogic = kea<messageEditLogicType>([
                 return
             }
             let count: number | null = null
+            let changesProject = false
             try {
                 const preview = await tasksRunsEditMessagePreviewCreate(String(projectId), taskId, runId, {
                     address: { run_id: item.logAddress.runId, index: item.logAddress.index },
                     original_text: item.text ?? '',
                 })
                 count = preview.removed_message_count
+                changesProject = preview.removed_turns_change_project === true
             } catch {
                 count = null
             }
             // A slow answer for an editor that has since closed, or moved to another message, is dropped.
             if (values.editingMessageId === item.id) {
-                actions.setRemovedMessageCount(count)
+                actions.setRemovedMessageCount(count, changesProject)
             }
         },
         saveEdit: async ({ item }) => {
