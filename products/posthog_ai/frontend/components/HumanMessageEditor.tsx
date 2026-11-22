@@ -6,7 +6,7 @@ export interface HumanMessageEditorProps {
     value: string
     onChange: (value: string) => void
     onSave: () => void
-    onCancel: () => void
+    onCancel: (source: 'button' | 'escape') => void
     saving: boolean
     error: string | null
     saveDisabledReason?: string
@@ -33,7 +33,10 @@ export function HumanMessageEditor({
                 value={value}
                 onChange={onChange}
                 onKeyDown={(event) =>
-                    handleMessageEditorKeyDown(event, { onSave: () => !saveDisabledReason && onSave(), onCancel })
+                    handleMessageEditorKeyDown(event, {
+                        onSave: () => !saveDisabledReason && onSave(),
+                        onCancel: () => onCancel('escape'),
+                    })
                 }
                 autoFocus
                 minRows={2}
@@ -54,7 +57,7 @@ export function HumanMessageEditor({
                 <LemonButton
                     type="secondary"
                     size="small"
-                    onClick={onCancel}
+                    onClick={() => onCancel('button')}
                     disabledReason={saving ? 'Saving your edit' : undefined}
                     data-attr="posthog-ai-human-message-edit-cancel"
                 >

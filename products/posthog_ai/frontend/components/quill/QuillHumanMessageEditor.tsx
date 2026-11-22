@@ -21,7 +21,10 @@ export function QuillHumanMessageEditor({
                     value={value}
                     onChange={(event) => onChange(event.currentTarget.value)}
                     onKeyDown={(event) =>
-                        handleMessageEditorKeyDown(event, { onSave: () => !saveDisabledReason && onSave(), onCancel })
+                        handleMessageEditorKeyDown(event, {
+                            onSave: () => !saveDisabledReason && onSave(),
+                            onCancel: () => onCancel('escape'),
+                        })
                     }
                     autoFocus
                     rows={3}
@@ -39,7 +42,7 @@ export function QuillHumanMessageEditor({
                     <Button
                         variant="outline"
                         size="sm"
-                        onClick={onCancel}
+                        onClick={() => onCancel('button')}
                         disabled={saving}
                         data-attr="posthog-ai-human-message-edit-cancel"
                     >

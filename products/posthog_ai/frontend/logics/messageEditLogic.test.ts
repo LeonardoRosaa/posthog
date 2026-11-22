@@ -24,6 +24,7 @@ import {
     messageEditBlockedReasons,
     messageEditLogic,
     MESSAGE_EDIT_CANCELLED_EVENT,
+    type MessageEditCancelSource,
     positionFromEnd,
     editSaveNotice,
     PROJECT_CHANGES_STAY_NOTICE,
@@ -242,31 +243,69 @@ describe('messageEditLogic', () => {
         ]).toEqual([2, 1, null])
     })
 
-    it('tracks a cancelled edit once, with counts and no text', async () => {
-        const capture = jest.spyOn(posthog, 'capture').mockImplementation(() => undefined)
+    const cancelledEvent = (cancelSource: MessageEditCancelSource): [string, Record<string, unknown>] => [
+        MESSAGE_EDIT_CANCELLED_EVENT,
+        {
+            task_id: 'task-1',
+            run_id: 'run-1',
+            removed_message_count: 3,
+            removed_turns_change_project: true,
+            position_from_end: null,
+            cancel_source: cancelSource,
+        },
+    ]
+
+    const openEditorWithCount = async (): Promise<void> => {
         jest.mocked(tasksRunsEditMessagePreviewCreate).mockResolvedValue({
             removed_message_count: 3,
             removed_turns_change_project: true,
         })
         await expectLogic(logic, () => logic.actions.startEdit(ITEM)).toDispatchActions(['setRemovedMessageCount'])
         logic.actions.setDraft('show weekly signups')
+    }
 
-        logic.actions.cancelEdit()
-        logic.actions.cancelEdit()
+    it.each<MessageEditCancelSource>(['button', 'escape'])(
+        'tracks a cancel by %s once, with counts and no text',
+        async (source) => {
+            const capture = jest.spyOn(posthog, 'capture').mockImplementation(() => undefined)
+            await openEditorWithCount()
 
-        expect(capture.mock.calls).toEqual([
-            [
-                MESSAGE_EDIT_CANCELLED_EVENT,
-                {
-                    task_id: 'task-1',
-                    run_id: 'run-1',
-                    removed_message_count: 3,
-                    removed_turns_change_project: true,
-                    position_from_end: null,
-                },
-            ],
-        ])
+            logic.actions.cancelEdit(source)
+            logic.actions.cancelEdit(source)
+
+            expect(capture.mock.calls).toEqual([cancelledEvent(source)])
+            capture.mockRestore()
+        }
+    )
+
+    it.each<[string, 'open' | 'cancelled' | 'saved' | 'saving', MessageEditCancelSource[]]>([
+        ['with an editor open counts as leaving the page', 'open', ['left_page']],
+        ['after a cancel sends nothing more', 'cancelled', ['button']],
+        ['after a save sends no cancel', 'saved', []],
+        ['while a save is in flight sends no cancel', 'saving', []],
+    ])('unmounting %s', async (_name, state, expectedSources) => {
+        const capture = jest.spyOn(posthog, 'capture').mockImplementation(() => undefined)
+        await openEditorWithCount()
+        if (state === 'cancelled') {
+            logic.actions.cancelEdit('button')
+        }
+        if (state === 'saved') {
+            jest.mocked(tasksRunsEditMessageCreate).mockResolvedValue({
+                run: { id: 'run-2', task: 'task-1', status: 'queued' } as TaskRunDetailDTOApi,
+            })
+            await expectLogic(logic, () => logic.actions.saveEdit(ITEM)).toDispatchActions(['saveEditSuccess'])
+        }
+        if (state === 'saving') {
+            jest.mocked(tasksRunsEditMessageCreate).mockReturnValue(new Promise(() => {}))
+            logic.actions.saveEdit(ITEM)
+        }
+
+        logic.unmount()
+
+        expect(capture.mock.calls).toEqual(expectedSources.map(cancelledEvent))
         capture.mockRestore()
+        // afterEach unmounts it again.
+        logic.mount()
     })
 
     it('drops a count that arrives after the editor closed', async () => {
