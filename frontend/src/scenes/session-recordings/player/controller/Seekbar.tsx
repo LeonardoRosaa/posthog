@@ -92,7 +92,7 @@ export function Seekbar(): JSX.Element {
     const { timestampFormat } = useValues(playerSettingsLogic)
 
     const { handleDown, setSlider, setThumb } = useActions(seekbarLogic(logicProps))
-    const { sessionPlayerData, sessionPlayerMetaData, effectiveSourceLoadingStates } = useValues(
+    const { sessionPlayerData, effectiveSourceLoadingStates } = useValues(
         sessionRecordingDataCoordinatorLogic(logicProps)
     )
 
@@ -193,11 +193,6 @@ export function Seekbar(): JSX.Element {
                             minMs={0}
                             maxMs={sessionPlayerData.durationMs}
                             seekBarRef={seekBarRef}
-                            activeMs={
-                                sessionPlayerMetaData?.active_seconds
-                                    ? sessionPlayerMetaData.active_seconds * 1000
-                                    : null
-                            }
                             timestampFormat={timestampFormat}
                             startTime={sessionPlayerData.start}
                             showPreviewFrame={!!allowPreviewScrubbing}

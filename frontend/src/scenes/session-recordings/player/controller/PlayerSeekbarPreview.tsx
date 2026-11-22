@@ -1,5 +1,5 @@
 import { BindLogic, useActions, useValues } from 'kea'
-import { MutableRefObject, memo, useEffect, useRef, useState } from 'react'
+import { MutableRefObject, memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useDebouncedCallback } from 'use-debounce'
 
 import { Dayjs } from 'lib/dayjs'
@@ -13,30 +13,31 @@ import { TimestampFormat } from '../playerSettingsLogic'
 import {
     SessionRecordingPlayerLogicProps,
     SessionRecordingPlayerMode,
+    findSegmentForTimestamp,
     sessionRecordingPlayerLogic,
 } from '../sessionRecordingPlayerLogic'
+import { seekbarPreviewTarget, urlAtTimestamp } from './seekbarPreviewTarget'
 
-const TWENTY_MINUTES_IN_MS = 20 * 60 * 1000
+// The preview player keeps a second copy of the recorded page in memory. It is created on the first
+// hover and removed after this long without one, so a viewer who never hovers pays nothing for it.
+const UNMOUNT_PREVIEW_AFTER_MS = 30 * 1000
 
 export type PlayerSeekbarPreviewProps = {
     minMs: number
     maxMs: number
     seekBarRef: MutableRefObject<HTMLDivElement | null>
-    activeMs: number | null
     timestampFormat: TimestampFormat
     startTime: Dayjs | null
     showPreviewFrame?: boolean
 }
 
 const PlayerSeekbarPreviewFrame = ({
-    percentage,
-    minMs,
-    maxMs,
+    targetMs,
     isVisible,
-}: { percentage: number; isVisible: boolean } & Omit<
-    PlayerSeekbarPreviewProps,
-    'seekBarRef' | 'activeMs' | 'timestampFormat' | 'startTime'
->): JSX.Element | null => {
+}: {
+    targetMs: number | null
+    isVisible: boolean
+}): JSX.Element | null => {
     const { sessionRecordingId, logicProps } = useValues(sessionRecordingPlayerLogic)
 
     const seekPlayerLogicProps: SessionRecordingPlayerLogicProps = {
@@ -60,14 +61,16 @@ const PlayerSeekbarPreviewFrame = ({
     )
 
     useEffect(() => {
-        if (isVisible) {
-            debouncedSeekToTime(minMs + (maxMs - minMs) * percentage)
+        if (isVisible && targetMs !== null) {
+            debouncedSeekToTime(targetMs)
         }
-    }, [percentage, minMs, maxMs, isVisible]) // oxlint-disable-line react-hooks/exhaustive-deps
+    }, [targetMs, isVisible]) // oxlint-disable-line react-hooks/exhaustive-deps
 
+    // Hidden rather than unmounted when there is no frame to show, so the next hover with a frame
+    // reuses the player that already exists.
     return (
         <BindLogic logic={sessionRecordingPlayerLogic} props={seekPlayerLogicProps}>
-            <div className="bg-red w-60 h-40">
+            <div className={cn('bg-red w-60 h-40', targetMs === null && 'hidden')}>
                 <PlayerFrame />
             </div>
         </BindLogic>
@@ -78,7 +81,6 @@ export const PlayerSeekbarPreview = memo(function PlayerSeekbarPreview({
     minMs,
     maxMs,
     seekBarRef,
-    activeMs,
     timestampFormat,
     startTime,
     showPreviewFrame = false,
@@ -101,8 +103,40 @@ export const PlayerSeekbarPreview = memo(function PlayerSeekbarPreview({
               : '00:00:00'
 
     const isHovering = useIsHovering(seekBarRef)
+    const { sessionPlayerData, urls } = useValues(sessionRecordingPlayerLogic)
 
-    const canShowPreview = showPreviewFrame && typeof activeMs === 'number' && activeMs < TWENTY_MINUTES_IN_MS
+    const [isPreviewMounted, setIsPreviewMounted] = useState(false)
+    useEffect(() => {
+        if (!showPreviewFrame) {
+            setIsPreviewMounted(false)
+            return
+        }
+        if (isHovering) {
+            setIsPreviewMounted(true)
+            return
+        }
+        const timeoutId = setTimeout(() => setIsPreviewMounted(false), UNMOUNT_PREVIEW_AFTER_MS)
+        return () => clearTimeout(timeoutId)
+    }, [showPreviewFrame, isHovering])
+
+    const hoverTimestamp = (startTime?.valueOf() ?? 0) + minMs + (maxMs - minMs) * percentage
+    const previewTarget = useMemo(
+        () =>
+            showPreviewFrame
+                ? seekbarPreviewTarget(
+                      hoverTimestamp,
+                      findSegmentForTimestamp(sessionPlayerData.segments, hoverTimestamp),
+                      sessionPlayerData.snapshotsByWindowId
+                  )
+                : null,
+        [showPreviewFrame, hoverTimestamp, sessionPlayerData.segments, sessionPlayerData.snapshotsByWindowId]
+    )
+    const previewTargetMs =
+        previewTarget?.kind === 'frame' ? previewTarget.timestamp - (startTime?.valueOf() ?? 0) : null
+    const fallbackUrl = previewTarget?.kind === 'url-only' ? urlAtTimestamp(urls, hoverTimestamp) : undefined
+
+    const canShowPreview = showPreviewFrame && isPreviewMounted
+    const isShowingFrame = canShowPreview && previewTargetMs !== null
 
     useEffect(() => {
         if (!seekBarRef?.current) {
@@ -137,18 +171,16 @@ export const PlayerSeekbarPreview = memo(function PlayerSeekbarPreview({
                 <div
                     className={cn(
                         'PlayerSeekBarPreview__tooltip__content',
-                        canShowPreview && 'PlayerSeekBarPreview__tooltip__content--with-preview'
+                        isShowingFrame && 'PlayerSeekBarPreview__tooltip__content--with-preview'
                     )}
                 >
-                    {canShowPreview && (
-                        <PlayerSeekbarPreviewFrame
-                            minMs={minMs}
-                            maxMs={maxMs}
-                            percentage={percentage}
-                            isVisible={isHovering}
-                        />
-                    )}
+                    {canShowPreview && <PlayerSeekbarPreviewFrame targetMs={previewTargetMs} isVisible={isHovering} />}
                     <div className="text-center p-2">{content}</div>
+                    {fallbackUrl ? (
+                        <div className="max-w-60 truncate px-2 pb-2 text-center font-normal text-secondary">
+                            {fallbackUrl}
+                        </div>
+                    ) : null}
                 </div>
             </div>
         </div>

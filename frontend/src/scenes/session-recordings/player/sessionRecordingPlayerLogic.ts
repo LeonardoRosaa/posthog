@@ -98,6 +98,7 @@ import {
     type playerCommentOverlayLogicType,
 } from './commenting/playerFrameCommentOverlayLogic'
 import { clipWindowSeconds } from './controller/clipRange'
+import { urlAtTimestamp } from './controller/seekbarPreviewTarget'
 import { getPlayerFrameLoadDiagnostics } from './playerFrameLoadDiagnostics'
 import { playerSettingsLogic } from './playerSettingsLogic'
 import { snapshotDataLogic } from './snapshotDataLogic'
@@ -2407,14 +2408,7 @@ export const sessionRecordingPlayerLogic = kea<sessionRecordingPlayerLogicType>(
                 if (!urls.length || !currentTimestamp) {
                     return sessionPlayerMetaData?.start_url ?? undefined
                 }
-
-                // Go through the events in reverse to find the latest pageview
-                for (let i = urls.length - 1; i >= 0; i--) {
-                    const urlTimestamp = urls[i]
-                    if (i === 0 || urlTimestamp.timestamp < currentTimestamp) {
-                        return urlTimestamp.url
-                    }
-                }
+                return urlAtTimestamp(urls, currentTimestamp)
             },
         ],
         resolution: [
